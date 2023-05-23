@@ -1,14 +1,12 @@
 // Copyright 2014 The Gogs Authors. All rights reserved.
 // Copyright 2019 The Gitea Authors. All rights reserved.
-// Use of this source code is governed by a MIT-style
-// license that can be found in the LICENSE file.
+// SPDX-License-Identifier: MIT
 
 package forms
 
 import (
 	"net/http"
 
-	"code.gitea.io/gitea/models"
 	"code.gitea.io/gitea/modules/context"
 	"code.gitea.io/gitea/modules/structs"
 	"code.gitea.io/gitea/modules/web/middleware"
@@ -25,20 +23,20 @@ import (
 
 // CreateOrgForm form for creating organization
 type CreateOrgForm struct {
-	OrgName                   string `binding:"Required;AlphaDashDot;MaxSize(40)" locale:"org.org_name_holder"`
+	OrgName                   string `binding:"Required;Username;MaxSize(40)" locale:"org.org_name_holder"`
 	Visibility                structs.VisibleType
 	RepoAdminChangeTeamAccess bool
 }
 
 // Validate validates the fields
 func (f *CreateOrgForm) Validate(req *http.Request, errs binding.Errors) binding.Errors {
-	ctx := context.GetContext(req)
+	ctx := context.GetValidateContext(req)
 	return middleware.Validate(errs, ctx.Data, f, ctx.Locale)
 }
 
 // UpdateOrgSettingForm form for updating organization settings
 type UpdateOrgSettingForm struct {
-	Name                      string `binding:"Required;AlphaDashDot;MaxSize(40)" locale:"org.org_name_holder"`
+	Name                      string `binding:"Required;Username;MaxSize(40)" locale:"org.org_name_holder"`
 	FullName                  string `binding:"MaxSize(100)"`
 	Description               string `binding:"MaxSize(255)"`
 	Website                   string `binding:"ValidUrl;MaxSize(255)"`
@@ -50,7 +48,7 @@ type UpdateOrgSettingForm struct {
 
 // Validate validates the fields
 func (f *UpdateOrgSettingForm) Validate(req *http.Request, errs binding.Errors) binding.Errors {
-	ctx := context.GetContext(req)
+	ctx := context.GetValidateContext(req)
 	return middleware.Validate(errs, ctx.Data, f, ctx.Locale)
 }
 
@@ -66,13 +64,12 @@ type CreateTeamForm struct {
 	TeamName         string `binding:"Required;AlphaDashDot;MaxSize(30)"`
 	Description      string `binding:"MaxSize(255)"`
 	Permission       string
-	Units            []models.UnitType
 	RepoAccess       string
 	CanCreateOrgRepo bool
 }
 
 // Validate validates the fields
 func (f *CreateTeamForm) Validate(req *http.Request, errs binding.Errors) binding.Errors {
-	ctx := context.GetContext(req)
+	ctx := context.GetValidateContext(req)
 	return middleware.Validate(errs, ctx.Data, f, ctx.Locale)
 }

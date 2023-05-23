@@ -1,8 +1,7 @@
-// +build !windows
-
 // Copyright 2019 The Gitea Authors. All rights reserved.
-// Use of this source code is governed by a MIT-style
-// license that can be found in the LICENSE file.
+// SPDX-License-Identifier: MIT
+
+//go:build !windows
 
 package graceful
 
@@ -11,11 +10,15 @@ import (
 	"errors"
 	"os"
 	"os/signal"
+	"runtime/pprof"
+	"strconv"
 	"sync"
 	"syscall"
 	"time"
 
+	"code.gitea.io/gitea/modules/graceful/releasereopen"
 	"code.gitea.io/gitea/modules/log"
+	"code.gitea.io/gitea/modules/process"
 	"code.gitea.io/gitea/modules/setting"
 )
 
@@ -28,11 +31,11 @@ type Manager struct {
 	shutdownCtx            context.Context
 	hammerCtx              context.Context
 	terminateCtx           context.Context
-	doneCtx                context.Context
+	managerCtx             context.Context
 	shutdownCtxCancel      context.CancelFunc
 	hammerCtxCancel        context.CancelFunc
 	terminateCtxCancel     context.CancelFunc
-	doneCtxCancel          context.CancelFunc
+	managerCtxCancel       context.CancelFunc
 	runningServerWaitGroup sync.WaitGroup
 	createServerWaitGroup  sync.WaitGroup
 	terminateWaitGroup     sync.WaitGroup
@@ -44,7 +47,7 @@ type Manager struct {
 
 func newGracefulManager(ctx context.Context) *Manager {
 	manager := &Manager{
-		isChild: len(os.Getenv(listenFDs)) > 0 && os.Getppid() > 1,
+		isChild: len(os.Getenv(listenFDsEnv)) > 0 && os.Getppid() > 1,
 		lock:    &sync.RWMutex{},
 	}
 	manager.createServerWaitGroup.Add(numberOfServersToCreate)
@@ -52,16 +55,63 @@ func newGracefulManager(ctx context.Context) *Manager {
 	return manager
 }
 
+type systemdNotifyMsg string
+
+const (
+	readyMsg     systemdNotifyMsg = "READY=1"
+	stoppingMsg  systemdNotifyMsg = "STOPPING=1"
+	reloadingMsg systemdNotifyMsg = "RELOADING=1"
+	watchdogMsg  systemdNotifyMsg = "WATCHDOG=1"
+)
+
+func statusMsg(msg string) systemdNotifyMsg {
+	return systemdNotifyMsg("STATUS=" + msg)
+}
+
+func pidMsg() systemdNotifyMsg {
+	return systemdNotifyMsg("MAINPID=" + strconv.Itoa(os.Getpid()))
+}
+
+// Notify systemd of status via the notify protocol
+func (g *Manager) notify(msg systemdNotifyMsg) {
+	conn, err := getNotifySocket()
+	if err != nil {
+		// the err is logged in getNotifySocket
+		return
+	}
+	if conn == nil {
+		return
+	}
+	defer conn.Close()
+
+	if _, err = conn.Write([]byte(msg)); err != nil {
+		log.Warn("Failed to notify NOTIFY_SOCKET: %v", err)
+		return
+	}
+}
+
 func (g *Manager) start(ctx context.Context) {
 	// Make contexts
 	g.terminateCtx, g.terminateCtxCancel = context.WithCancel(ctx)
 	g.shutdownCtx, g.shutdownCtxCancel = context.WithCancel(ctx)
 	g.hammerCtx, g.hammerCtxCancel = context.WithCancel(ctx)
-	g.doneCtx, g.doneCtxCancel = context.WithCancel(ctx)
+	g.managerCtx, g.managerCtxCancel = context.WithCancel(ctx)
+
+	// Next add pprof labels to these contexts
+	g.terminateCtx = pprof.WithLabels(g.terminateCtx, pprof.Labels("graceful-lifecycle", "with-terminate"))
+	g.shutdownCtx = pprof.WithLabels(g.shutdownCtx, pprof.Labels("graceful-lifecycle", "with-shutdown"))
+	g.hammerCtx = pprof.WithLabels(g.hammerCtx, pprof.Labels("graceful-lifecycle", "with-hammer"))
+	g.managerCtx = pprof.WithLabels(g.managerCtx, pprof.Labels("graceful-lifecycle", "with-manager"))
+
+	// Now label this and all goroutines created by this goroutine with the graceful-lifecycle manager
+	pprof.SetGoroutineLabels(g.managerCtx)
+	defer pprof.SetGoroutineLabels(ctx)
 
 	// Set the running state & handle signals
 	g.setState(stateRunning)
-	go g.handleSignals(ctx)
+	g.notify(statusMsg("Starting Gitea"))
+	g.notify(pidMsg())
+	go g.handleSignals(g.managerCtx)
 
 	// Handle clean up of unused provided listeners	and delayed start-up
 	startupDone := make(chan struct{})
@@ -73,6 +123,7 @@ func (g *Manager) start(ctx context.Context) {
 		// Ignore the error here there's not much we can do with it
 		// They're logged in the CloseProvidedListeners function
 		_ = CloseProvidedListeners()
+		g.notify(readyMsg)
 	}()
 	if setting.StartupTimeout > 0 {
 		go func() {
@@ -93,6 +144,8 @@ func (g *Manager) start(ctx context.Context) {
 				return
 			case <-time.After(setting.StartupTimeout):
 				log.Error("Startup took too long! Shutting down")
+				g.notify(statusMsg("Startup took too long! Shutting down"))
+				g.notify(stoppingMsg)
 				g.doShutdown()
 			}
 		}()
@@ -100,6 +153,9 @@ func (g *Manager) start(ctx context.Context) {
 }
 
 func (g *Manager) handleSignals(ctx context.Context) {
+	ctx, _, finished := process.GetManager().AddTypedContext(ctx, "Graceful: HandleSignals", process.SystemProcessType, true)
+	defer finished()
+
 	signalChannel := make(chan os.Signal, 1)
 
 	signal.Notify(
@@ -112,6 +168,13 @@ func (g *Manager) handleSignals(ctx context.Context) {
 		syscall.SIGTSTP,
 	)
 
+	watchdogTimeout := getWatchdogTimeout()
+	t := &time.Ticker{}
+	if watchdogTimeout != 0 {
+		g.notify(watchdogMsg)
+		t = time.NewTicker(watchdogTimeout / 2)
+	}
+
 	pid := syscall.Getpid()
 	for {
 		select {
@@ -122,7 +185,8 @@ func (g *Manager) handleSignals(ctx context.Context) {
 				g.DoGracefulRestart()
 			case syscall.SIGUSR1:
 				log.Warn("PID %d. Received SIGUSR1. Releasing and reopening logs", pid)
-				if err := log.ReleaseReopen(); err != nil {
+				g.notify(statusMsg("Releasing and reopening logs"))
+				if err := releasereopen.GetManager().ReleaseReopen(); err != nil {
 					log.Error("Error whilst releasing and reopening logs: %v", err)
 				}
 			case syscall.SIGUSR2:
@@ -139,9 +203,12 @@ func (g *Manager) handleSignals(ctx context.Context) {
 			default:
 				log.Info("PID %d. Received %v.", pid, sig)
 			}
+		case <-t.C:
+			g.notify(watchdogMsg)
 		case <-ctx.Done():
 			log.Warn("PID: %d. Background context for manager closed - %v - Shutting down...", pid, ctx.Err())
 			g.DoGracefulShutdown()
+			return
 		}
 	}
 }
@@ -154,6 +221,9 @@ func (g *Manager) doFork() error {
 	}
 	g.forked = true
 	g.lock.Unlock()
+
+	g.notify(reloadingMsg)
+
 	// We need to move the file logs to append pids
 	setting.RestartLogsWithPIDSuffix()
 
@@ -167,23 +237,40 @@ func (g *Manager) DoGracefulRestart() {
 	if setting.GracefulRestartable {
 		log.Info("PID: %d. Forking...", os.Getpid())
 		err := g.doFork()
-		if err != nil && err.Error() != "another process already forked. Ignoring this one" {
-			log.Error("Error whilst forking from PID: %d : %v", os.Getpid(), err)
+		if err != nil {
+			if err.Error() == "another process already forked. Ignoring this one" {
+				g.DoImmediateHammer()
+			} else {
+				log.Error("Error whilst forking from PID: %d : %v", os.Getpid(), err)
+			}
 		}
+		// doFork calls RestartProcess which starts a new Gitea process, so this parent process needs to exit
+		// Otherwise some resources (eg: leveldb lock) will be held by this parent process and the new process will fail to start
+		log.Info("PID: %d. Shutting down after forking ...", os.Getpid())
+		g.doShutdown()
 	} else {
 		log.Info("PID: %d. Not set restartable. Shutting down...", os.Getpid())
-
+		g.notify(stoppingMsg)
 		g.doShutdown()
 	}
 }
 
 // DoImmediateHammer causes an immediate hammer
 func (g *Manager) DoImmediateHammer() {
+	g.notify(statusMsg("Sending immediate hammer"))
 	g.doHammerTime(0 * time.Second)
 }
 
 // DoGracefulShutdown causes a graceful shutdown
 func (g *Manager) DoGracefulShutdown() {
+	g.lock.Lock()
+	if !g.forked {
+		g.lock.Unlock()
+		g.notify(stoppingMsg)
+	} else {
+		g.lock.Unlock()
+		g.notify(statusMsg("Shutting down after fork"))
+	}
 	g.doShutdown()
 }
 

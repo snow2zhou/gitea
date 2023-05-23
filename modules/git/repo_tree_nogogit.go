@@ -1,18 +1,16 @@
 // Copyright 2020 The Gitea Authors. All rights reserved.
-// Use of this source code is governed by a MIT-style
-// license that can be found in the LICENSE file.
+// SPDX-License-Identifier: MIT
 
-// +build !gogit
+//go:build !gogit
 
 package git
 
 import (
 	"io"
-	"io/ioutil"
 )
 
 func (repo *Repository) getTree(id SHA1) (*Tree, error) {
-	wr, rd, cancel := repo.CatFileBatch()
+	wr, rd, cancel := repo.CatFileBatch(repo.Ctx)
 	defer cancel()
 
 	_, _ = wr.Write([]byte(id.String() + "\n"))
@@ -26,7 +24,7 @@ func (repo *Repository) getTree(id SHA1) (*Tree, error) {
 	switch typ {
 	case "tag":
 		resolvedID := id
-		data, err := ioutil.ReadAll(io.LimitReader(rd, size))
+		data, err := io.ReadAll(io.LimitReader(rd, size))
 		if err != nil {
 			return nil, err
 		}
@@ -34,7 +32,7 @@ func (repo *Repository) getTree(id SHA1) (*Tree, error) {
 		if err != nil {
 			return nil, err
 		}
-		commit, err := tag.Commit()
+		commit, err := tag.Commit(repo)
 		if err != nil {
 			return nil, err
 		}
@@ -68,7 +66,7 @@ func (repo *Repository) getTree(id SHA1) (*Tree, error) {
 
 // GetTree find the tree object in the repository.
 func (repo *Repository) GetTree(idStr string) (*Tree, error) {
-	if len(idStr) != 40 {
+	if len(idStr) != SHAFullLength {
 		res, err := repo.GetRefCommitID(idStr)
 		if err != nil {
 			return nil, err
