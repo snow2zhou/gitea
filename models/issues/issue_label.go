@@ -39,7 +39,7 @@ func newIssueLabel(ctx context.Context, issue *Issue, label *Label, doer *user_m
 	}
 
 	if err = issue.LoadRepo(ctx); err != nil {
-		return
+		return err
 	}
 
 	opts := &CreateCommentOptions{
@@ -53,6 +53,8 @@ func newIssueLabel(ctx context.Context, issue *Issue, label *Label, doer *user_m
 	if _, err = CreateComment(ctx, opts); err != nil {
 		return err
 	}
+
+	issue.Labels = append(issue.Labels, label)
 
 	return updateLabelCols(ctx, label, "num_issues", "num_closed_issue")
 }
@@ -81,40 +83,33 @@ func RemoveDuplicateExclusiveIssueLabels(ctx context.Context, issue *Issue, labe
 }
 
 // NewIssueLabel creates a new issue-label relation.
-func NewIssueLabel(issue *Issue, label *Label, doer *user_model.User) (err error) {
-	if HasIssueLabel(db.DefaultContext, issue.ID, label.ID) {
+func NewIssueLabel(ctx context.Context, issue *Issue, label *Label, doer *user_model.User) (err error) {
+	if HasIssueLabel(ctx, issue.ID, label.ID) {
 		return nil
 	}
 
-	ctx, committer, err := db.TxContext(db.DefaultContext)
-	if err != nil {
-		return err
-	}
-	defer committer.Close()
+	return db.WithTx(ctx, func(ctx context.Context) error {
+		if err = issue.LoadRepo(ctx); err != nil {
+			return err
+		}
 
-	if err = issue.LoadRepo(ctx); err != nil {
-		return err
-	}
+		// Do NOT add invalid labels
+		if issue.RepoID != label.RepoID && issue.Repo.OwnerID != label.OrgID {
+			return nil
+		}
 
-	// Do NOT add invalid labels
-	if issue.RepoID != label.RepoID && issue.Repo.OwnerID != label.OrgID {
-		return nil
-	}
+		if err = RemoveDuplicateExclusiveIssueLabels(ctx, issue, label, doer); err != nil {
+			return nil
+		}
 
-	if err = RemoveDuplicateExclusiveIssueLabels(ctx, issue, label, doer); err != nil {
-		return nil
-	}
+		if err = newIssueLabel(ctx, issue, label, doer); err != nil {
+			return err
+		}
 
-	if err = newIssueLabel(ctx, issue, label, doer); err != nil {
-		return err
-	}
-
-	issue.Labels = nil
-	if err = issue.LoadLabels(ctx); err != nil {
-		return err
-	}
-
-	return committer.Commit()
+		issue.isLabelsLoaded = false
+		issue.Labels = nil
+		return issue.LoadLabels(ctx)
+	})
 }
 
 // newIssueLabels add labels to an issue. It will check if the labels are valid for the issue
@@ -122,11 +117,20 @@ func newIssueLabels(ctx context.Context, issue *Issue, labels []*Label, doer *us
 	if err = issue.LoadRepo(ctx); err != nil {
 		return err
 	}
+
+	if err = issue.LoadLabels(ctx); err != nil {
+		return err
+	}
+
 	for _, l := range labels {
 		// Don't add already present labels and invalid labels
 		if HasIssueLabel(ctx, issue.ID, l.ID) ||
 			(l.RepoID != issue.RepoID && l.OrgID != issue.Repo.OwnerID) {
 			continue
+		}
+
+		if err = RemoveDuplicateExclusiveIssueLabels(ctx, issue, l, doer); err != nil {
+			return err
 		}
 
 		if err = newIssueLabel(ctx, issue, l, doer); err != nil {
@@ -138,23 +142,17 @@ func newIssueLabels(ctx context.Context, issue *Issue, labels []*Label, doer *us
 }
 
 // NewIssueLabels creates a list of issue-label relations.
-func NewIssueLabels(issue *Issue, labels []*Label, doer *user_model.User) (err error) {
-	ctx, committer, err := db.TxContext(db.DefaultContext)
-	if err != nil {
-		return err
-	}
-	defer committer.Close()
+func NewIssueLabels(ctx context.Context, issue *Issue, labels []*Label, doer *user_model.User) (err error) {
+	return db.WithTx(ctx, func(ctx context.Context) error {
+		if err = newIssueLabels(ctx, issue, labels, doer); err != nil {
+			return err
+		}
 
-	if err = newIssueLabels(ctx, issue, labels, doer); err != nil {
-		return err
-	}
-
-	issue.Labels = nil
-	if err = issue.LoadLabels(ctx); err != nil {
-		return err
-	}
-
-	return committer.Commit()
+		// reload all labels
+		issue.isLabelsLoaded = false
+		issue.Labels = nil
+		return issue.LoadLabels(ctx)
+	})
 }
 
 func deleteIssueLabel(ctx context.Context, issue *Issue, label *Label, doer *user_model.User) (err error) {
@@ -168,7 +166,7 @@ func deleteIssueLabel(ctx context.Context, issue *Issue, label *Label, doer *use
 	}
 
 	if err = issue.LoadRepo(ctx); err != nil {
-		return
+		return err
 	}
 
 	opts := &CreateCommentOptions{
@@ -192,6 +190,7 @@ func DeleteIssueLabel(ctx context.Context, issue *Issue, label *Label, doer *use
 	}
 
 	issue.Labels = nil
+	issue.isLabelsLoaded = false
 	return issue.LoadLabels(ctx)
 }
 
@@ -314,11 +313,12 @@ func FixIssueLabelWithOutsideLabels(ctx context.Context) (int64, error) {
 
 // LoadLabels loads labels
 func (issue *Issue) LoadLabels(ctx context.Context) (err error) {
-	if issue.Labels == nil && issue.ID != 0 {
+	if !issue.isLabelsLoaded && issue.Labels == nil && issue.ID != 0 {
 		issue.Labels, err = GetLabelsByIssueID(ctx, issue.ID)
 		if err != nil {
 			return fmt.Errorf("getLabelsByIssueID [%d]: %w", issue.ID, err)
 		}
+		issue.isLabelsLoaded = true
 	}
 	return nil
 }
@@ -348,36 +348,24 @@ func clearIssueLabels(ctx context.Context, issue *Issue, doer *user_model.User) 
 
 // ClearIssueLabels removes all issue labels as the given user.
 // Triggers appropriate WebHooks, if any.
-func ClearIssueLabels(issue *Issue, doer *user_model.User) (err error) {
-	ctx, committer, err := db.TxContext(db.DefaultContext)
-	if err != nil {
-		return err
-	}
-	defer committer.Close()
+func ClearIssueLabels(ctx context.Context, issue *Issue, doer *user_model.User) (err error) {
+	return db.WithTx(ctx, func(ctx context.Context) error {
+		if err := issue.LoadRepo(ctx); err != nil {
+			return err
+		} else if err = issue.LoadPullRequest(ctx); err != nil {
+			return err
+		}
 
-	if err := issue.LoadRepo(ctx); err != nil {
-		return err
-	} else if err = issue.LoadPullRequest(ctx); err != nil {
-		return err
-	}
+		perm, err := access_model.GetUserRepoPermission(ctx, issue.Repo, doer)
+		if err != nil {
+			return err
+		}
+		if !perm.CanWriteIssuesOrPulls(issue.IsPull) {
+			return ErrRepoLabelNotExist{}
+		}
 
-	perm, err := access_model.GetUserRepoPermission(ctx, issue.Repo, doer)
-	if err != nil {
-		return err
-	}
-	if !perm.CanWriteIssuesOrPulls(issue.IsPull) {
-		return ErrRepoLabelNotExist{}
-	}
-
-	if err = clearIssueLabels(ctx, issue, doer); err != nil {
-		return err
-	}
-
-	if err = committer.Commit(); err != nil {
-		return fmt.Errorf("Commit: %w", err)
-	}
-
-	return nil
+		return clearIssueLabels(ctx, issue, doer)
+	})
 }
 
 type labelSorter []*Label
@@ -421,70 +409,62 @@ func RemoveDuplicateExclusiveLabels(labels []*Label) []*Label {
 
 // ReplaceIssueLabels removes all current labels and add new labels to the issue.
 // Triggers appropriate WebHooks, if any.
-func ReplaceIssueLabels(issue *Issue, labels []*Label, doer *user_model.User) (err error) {
-	ctx, committer, err := db.TxContext(db.DefaultContext)
-	if err != nil {
-		return err
-	}
-	defer committer.Close()
+func ReplaceIssueLabels(ctx context.Context, issue *Issue, labels []*Label, doer *user_model.User) (err error) {
+	return db.WithTx(ctx, func(ctx context.Context) error {
+		if err = issue.LoadRepo(ctx); err != nil {
+			return err
+		}
 
-	if err = issue.LoadRepo(ctx); err != nil {
-		return err
-	}
+		if err = issue.LoadLabels(ctx); err != nil {
+			return err
+		}
 
-	if err = issue.LoadLabels(ctx); err != nil {
-		return err
-	}
+		labels = RemoveDuplicateExclusiveLabels(labels)
 
-	labels = RemoveDuplicateExclusiveLabels(labels)
+		sort.Sort(labelSorter(labels))
+		sort.Sort(labelSorter(issue.Labels))
 
-	sort.Sort(labelSorter(labels))
-	sort.Sort(labelSorter(issue.Labels))
+		var toAdd, toRemove []*Label
 
-	var toAdd, toRemove []*Label
+		addIndex, removeIndex := 0, 0
+		for addIndex < len(labels) && removeIndex < len(issue.Labels) {
+			addLabel := labels[addIndex]
+			removeLabel := issue.Labels[removeIndex]
+			if addLabel.ID == removeLabel.ID {
+				// Silently drop invalid labels
+				if removeLabel.RepoID != issue.RepoID && removeLabel.OrgID != issue.Repo.OwnerID {
+					toRemove = append(toRemove, removeLabel)
+				}
 
-	addIndex, removeIndex := 0, 0
-	for addIndex < len(labels) && removeIndex < len(issue.Labels) {
-		addLabel := labels[addIndex]
-		removeLabel := issue.Labels[removeIndex]
-		if addLabel.ID == removeLabel.ID {
-			// Silently drop invalid labels
-			if removeLabel.RepoID != issue.RepoID && removeLabel.OrgID != issue.Repo.OwnerID {
+				addIndex++
+				removeIndex++
+			} else if addLabel.ID < removeLabel.ID {
+				// Only add if the label is valid
+				if addLabel.RepoID == issue.RepoID || addLabel.OrgID == issue.Repo.OwnerID {
+					toAdd = append(toAdd, addLabel)
+				}
+				addIndex++
+			} else {
 				toRemove = append(toRemove, removeLabel)
+				removeIndex++
 			}
+		}
+		toAdd = append(toAdd, labels[addIndex:]...)
+		toRemove = append(toRemove, issue.Labels[removeIndex:]...)
 
-			addIndex++
-			removeIndex++
-		} else if addLabel.ID < removeLabel.ID {
-			// Only add if the label is valid
-			if addLabel.RepoID == issue.RepoID || addLabel.OrgID == issue.Repo.OwnerID {
-				toAdd = append(toAdd, addLabel)
+		if len(toAdd) > 0 {
+			if err = newIssueLabels(ctx, issue, toAdd, doer); err != nil {
+				return fmt.Errorf("addLabels: %w", err)
 			}
-			addIndex++
-		} else {
-			toRemove = append(toRemove, removeLabel)
-			removeIndex++
 		}
-	}
-	toAdd = append(toAdd, labels[addIndex:]...)
-	toRemove = append(toRemove, issue.Labels[removeIndex:]...)
 
-	if len(toAdd) > 0 {
-		if err = newIssueLabels(ctx, issue, toAdd, doer); err != nil {
-			return fmt.Errorf("addLabels: %w", err)
+		for _, l := range toRemove {
+			if err = deleteIssueLabel(ctx, issue, l, doer); err != nil {
+				return fmt.Errorf("removeLabel: %w", err)
+			}
 		}
-	}
 
-	for _, l := range toRemove {
-		if err = deleteIssueLabel(ctx, issue, l, doer); err != nil {
-			return fmt.Errorf("removeLabel: %w", err)
-		}
-	}
-
-	issue.Labels = nil
-	if err = issue.LoadLabels(ctx); err != nil {
-		return err
-	}
-
-	return committer.Commit()
+		issue.Labels = nil
+		return issue.LoadLabels(ctx)
+	})
 }

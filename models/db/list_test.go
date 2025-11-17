@@ -18,11 +18,11 @@ type mockListOptions struct {
 	db.ListOptions
 }
 
-func (opts *mockListOptions) IsListAll() bool {
+func (opts mockListOptions) IsListAll() bool {
 	return true
 }
 
-func (opts *mockListOptions) ToConds() builder.Cond {
+func (opts mockListOptions) ToConds() builder.Cond {
 	return builder.NewCond()
 }
 
@@ -32,22 +32,21 @@ func TestFind(t *testing.T) {
 	assert.NoError(t, xe.Sync(&repo_model.RepoUnit{}))
 
 	var repoUnitCount int
-	_, err := db.GetEngine(db.DefaultContext).SQL("SELECT COUNT(*) FROM repo_unit").Get(&repoUnitCount)
+	_, err := db.GetEngine(t.Context()).SQL("SELECT COUNT(*) FROM repo_unit").Get(&repoUnitCount)
 	assert.NoError(t, err)
 	assert.NotEmpty(t, repoUnitCount)
 
 	opts := mockListOptions{}
-	var repoUnits []repo_model.RepoUnit
-	err = db.Find(db.DefaultContext, &opts, &repoUnits)
+	repoUnits, err := db.Find[repo_model.RepoUnit](t.Context(), opts)
 	assert.NoError(t, err)
 	assert.Len(t, repoUnits, repoUnitCount)
 
-	cnt, err := db.Count(db.DefaultContext, &opts, new(repo_model.RepoUnit))
+	cnt, err := db.Count[repo_model.RepoUnit](t.Context(), opts)
 	assert.NoError(t, err)
 	assert.EqualValues(t, repoUnitCount, cnt)
 
-	repoUnits = make([]repo_model.RepoUnit, 0, 10)
-	newCnt, err := db.FindAndCount(db.DefaultContext, &opts, &repoUnits)
+	repoUnits, newCnt, err := db.FindAndCount[repo_model.RepoUnit](t.Context(), opts)
 	assert.NoError(t, err)
-	assert.EqualValues(t, cnt, newCnt)
+	assert.Equal(t, cnt, newCnt)
+	assert.Len(t, repoUnits, repoUnitCount)
 }

@@ -15,12 +15,12 @@ import (
 )
 
 func SSHInfo(rw http.ResponseWriter, req *http.Request) {
-	if !git.SupportProcReceive {
+	if !git.DefaultFeatures().SupportProcReceive {
 		rw.WriteHeader(http.StatusNotFound)
 		return
 	}
 	rw.Header().Set("content-type", "text/json;charset=UTF-8")
-	_, err := rw.Write([]byte(`{"type":"gitea","version":1}`))
+	_, err := rw.Write([]byte(`{"type":"agit","version":1}`))
 	if err != nil {
 		log.Error("fail to write result: err: %v", err)
 		rw.WriteHeader(http.StatusInternalServerError)
@@ -34,9 +34,12 @@ func DummyOK(w http.ResponseWriter, req *http.Request) {
 }
 
 func RobotsTxt(w http.ResponseWriter, req *http.Request) {
-	filePath := util.FilePathJoinAbs(setting.CustomPath, "robots.txt")
-	httpcache.SetCacheControlInHeader(w.Header(), setting.StaticCacheTime)
-	http.ServeFile(w, req, filePath)
+	robotsTxt := util.FilePathJoinAbs(setting.CustomPath, "public/robots.txt")
+	if ok, _ := util.IsExist(robotsTxt); !ok {
+		robotsTxt = util.FilePathJoinAbs(setting.CustomPath, "robots.txt") // the legacy "robots.txt"
+	}
+	httpcache.SetCacheControlInHeader(w.Header(), httpcache.CacheControlForPublicStatic())
+	http.ServeFile(w, req, robotsTxt)
 }
 
 func StaticRedirect(target string) func(w http.ResponseWriter, req *http.Request) {

@@ -74,14 +74,3 @@
   padding: 1rem;
   text-align: center;
 }
-
-.edit-diff {
-  padding: 0 !important;
-}
-
-.edit-diff > div > .ui.table {
-  border-top: none !important;
-  border-bottom: none !important;
-  border-left: 1px solid var(--color-secondary) !important;
-  border-right: 1px solid var(--color-secondary) !important;
-}

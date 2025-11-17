@@ -13,6 +13,10 @@ import (
 	"code.gitea.io/gitea/models/perm"
 	repo_model "code.gitea.io/gitea/models/repo"
 	user_model "code.gitea.io/gitea/models/user"
+	"code.gitea.io/gitea/modules/setting"
+	"code.gitea.io/gitea/modules/structs"
+
+	"xorm.io/builder"
 )
 
 // Access represents the highest access level of a user to the repository. The only access type
@@ -39,7 +43,12 @@ func accessLevel(ctx context.Context, user *user_model.User, repo *repo_model.Re
 		restricted = user.IsRestricted
 	}
 
-	if !restricted && !repo.IsPrivate {
+	if err := repo.LoadOwner(ctx); err != nil {
+		return mode, err
+	}
+
+	repoIsFullyPublic := !setting.Service.RequireSignInViewStrict && repo.Owner.Visibility == structs.VisibleTypePublic && !repo.IsPrivate
+	if (restricted && repoIsFullyPublic) || (!restricted && !repo.IsPrivate) {
 		mode = perm.AccessModeRead
 	}
 
@@ -51,21 +60,21 @@ func accessLevel(ctx context.Context, user *user_model.User, repo *repo_model.Re
 		return perm.AccessModeOwner, nil
 	}
 
-	a := &Access{UserID: userID, RepoID: repo.ID}
-	if has, err := db.GetByBean(ctx, a); !has || err != nil {
+	a, exist, err := db.Get[Access](ctx, builder.Eq{"user_id": userID, "repo_id": repo.ID})
+	if err != nil {
 		return mode, err
+	} else if !exist {
+		return mode, nil
 	}
 	return a.Mode, nil
 }
 
 func maxAccessMode(modes ...perm.AccessMode) perm.AccessMode {
-	max := perm.AccessModeNone
+	maxMode := perm.AccessModeNone
 	for _, mode := range modes {
-		if mode > max {
-			max = mode
-		}
+		maxMode = max(maxMode, mode)
 	}
-	return max
+	return maxMode
 }
 
 type userAccess struct {
@@ -124,9 +133,9 @@ func refreshAccesses(ctx context.Context, repo *repo_model.Repository, accessMap
 
 // refreshCollaboratorAccesses retrieves repository collaborations with their access modes.
 func refreshCollaboratorAccesses(ctx context.Context, repoID int64, accessMap map[int64]*userAccess) error {
-	collaborators, err := repo_model.GetCollaborators(ctx, repoID, db.ListOptions{})
+	collaborators, _, err := repo_model.GetCollaborators(ctx, &repo_model.FindCollaborationOptions{RepoID: repoID})
 	if err != nil {
-		return fmt.Errorf("getCollaborations: %w", err)
+		return fmt.Errorf("GetCollaborators: %w", err)
 	}
 	for _, c := range collaborators {
 		if c.User.IsGhost() {

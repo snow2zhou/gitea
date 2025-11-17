@@ -6,13 +6,14 @@ package queue
 import (
 	"context"
 	"fmt"
+	"runtime/pprof"
 	"sync"
 	"sync/atomic"
 	"time"
 
-	"code.gitea.io/gitea/modules/graceful"
 	"code.gitea.io/gitea/modules/json"
 	"code.gitea.io/gitea/modules/log"
+	"code.gitea.io/gitea/modules/process"
 	"code.gitea.io/gitea/modules/setting"
 )
 
@@ -21,8 +22,9 @@ import (
 type WorkerPoolQueue[T any] struct {
 	ctxRun       context.Context
 	ctxRunCancel context.CancelFunc
-	ctxShutdown  atomic.Pointer[context.Context]
-	shutdownDone chan struct{}
+
+	shutdownDone    chan struct{}
+	shutdownTimeout atomic.Int64 // in case some buggy handlers (workers) would hang forever, "shutdown" should finish in predictable time
 
 	origHandler HandlerFuncT[T]
 	safeHandler HandlerFuncT[T]
@@ -31,8 +33,9 @@ type WorkerPoolQueue[T any] struct {
 	baseConfig    *BaseConfig
 	baseQueue     baseQueue
 
-	batchChan chan []T
-	flushChan chan flushType
+	batchChan  chan []T
+	flushChan  chan flushType
+	isFlushing atomic.Bool
 
 	batchLength     int
 	workerNum       int
@@ -41,7 +44,10 @@ type WorkerPoolQueue[T any] struct {
 	workerNumMu     sync.Mutex
 }
 
-type flushType chan struct{}
+type flushType struct {
+	timeout time.Duration
+	c       chan struct{}
+}
 
 var _ ManagedWorkerPoolQueue = (*WorkerPoolQueue[any])(nil)
 
@@ -92,7 +98,7 @@ func (q *WorkerPoolQueue[T]) GetQueueItemNumber() int {
 
 func (q *WorkerPoolQueue[T]) FlushWithContext(ctx context.Context, timeout time.Duration) (err error) {
 	if q.isBaseQueueDummy() {
-		return
+		return nil
 	}
 
 	log.Debug("Try to flush queue %q with timeout %v", q.GetName(), timeout)
@@ -103,12 +109,12 @@ func (q *WorkerPoolQueue[T]) FlushWithContext(ctx context.Context, timeout time.
 	if timeout > 0 {
 		after = time.After(timeout)
 	}
-	c := make(flushType)
+	flush := flushType{timeout: timeout, c: make(chan struct{})}
 
 	// send flush request
 	// if it blocks, it means that there is a flush in progress or the queue hasn't been started yet
 	select {
-	case q.flushChan <- c:
+	case q.flushChan <- flush:
 	case <-ctx.Done():
 		return ctx.Err()
 	case <-q.ctxRun.Done():
@@ -119,7 +125,7 @@ func (q *WorkerPoolQueue[T]) FlushWithContext(ctx context.Context, timeout time.
 
 	// wait for flush to finish
 	select {
-	case <-c:
+	case <-flush.c:
 		return nil
 	case <-ctx.Done():
 		return ctx.Err()
@@ -175,22 +181,19 @@ func (q *WorkerPoolQueue[T]) Has(data T) (bool, error) {
 	return q.baseQueue.HasItem(q.ctxRun, q.marshal(data))
 }
 
-func (q *WorkerPoolQueue[T]) Run(atShutdown, atTerminate func(func())) {
-	atShutdown(func() {
-		// in case some queue handlers are slow or have hanging bugs, at most wait for a short time
-		q.ShutdownWait(1 * time.Second)
-	})
+func (q *WorkerPoolQueue[T]) Run() {
 	q.doRun()
+}
+
+func (q *WorkerPoolQueue[T]) Cancel() {
+	q.ctxRunCancel()
 }
 
 // ShutdownWait shuts down the queue, waits for all workers to finish their jobs, and pushes the unhandled items back to the base queue
 // It waits for all workers (handlers) to finish their jobs, in case some buggy handlers would hang forever, a reasonable timeout is needed
 func (q *WorkerPoolQueue[T]) ShutdownWait(timeout time.Duration) {
-	shutdownCtx, shutdownCtxCancel := context.WithTimeout(context.Background(), timeout)
-	defer shutdownCtxCancel()
-	if q.ctxShutdown.CompareAndSwap(nil, &shutdownCtx) {
-		q.ctxRunCancel()
-	}
+	q.shutdownTimeout.Store(int64(timeout))
+	q.ctxRunCancel()
 	<-q.shutdownDone
 }
 
@@ -207,7 +210,11 @@ func getNewQueueFn(t string) (string, func(cfg *BaseConfig, unique bool) (baseQu
 	}
 }
 
-func NewWorkerPoolQueueBySetting[T any](name string, queueSetting setting.QueueSettings, handler HandlerFuncT[T], unique bool) (*WorkerPoolQueue[T], error) {
+func newWorkerPoolQueueForTest[T any](name string, queueSetting setting.QueueSettings, handler HandlerFuncT[T], unique bool) (*WorkerPoolQueue[T], error) {
+	return NewWorkerPoolQueueWithContext(context.Background(), name, queueSetting, handler, unique)
+}
+
+func NewWorkerPoolQueueWithContext[T any](ctx context.Context, name string, queueSetting setting.QueueSettings, handler HandlerFuncT[T], unique bool) (*WorkerPoolQueue[T], error) {
 	if handler == nil {
 		log.Debug("Use dummy queue for %q because handler is nil and caller doesn't want to process the queue items", name)
 		queueSetting.Type = "dummy"
@@ -224,22 +231,29 @@ func NewWorkerPoolQueueBySetting[T any](name string, queueSetting setting.QueueS
 	}
 	log.Trace("Created queue %q of type %q", name, queueType)
 
-	w.ctxRun, w.ctxRunCancel = context.WithCancel(graceful.GetManager().ShutdownContext())
+	w.ctxRun, _, w.ctxRunCancel = process.GetManager().AddTypedContext(ctx, "Queue: "+w.GetName(), process.SystemProcessType, false)
 	w.batchChan = make(chan []T)
 	w.flushChan = make(chan flushType)
 	w.shutdownDone = make(chan struct{})
+	w.shutdownTimeout.Store(int64(shutdownDefaultTimeout))
 	w.workerMaxNum = queueSetting.MaxWorkers
 	w.batchLength = queueSetting.BatchLength
 
 	w.origHandler = handler
 	w.safeHandler = func(t ...T) (unhandled []T) {
 		defer func() {
+			// FIXME: there is no ctx support in the handler, so process manager is unable to restore the labels
+			// so here we explicitly set the "queue ctx" labels again after the handler is done
+			pprof.SetGoroutineLabels(w.ctxRun)
 			err := recover()
 			if err != nil {
 				log.Error("Recovered from panic in queue %q handler: %v\n%s", name, err, log.Stack(2))
 			}
 		}()
-		return w.origHandler(t...)
+		if w.origHandler != nil {
+			return w.origHandler(t...)
+		}
+		return nil
 	}
 
 	return &w, nil

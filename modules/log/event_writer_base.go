@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"regexp"
+	"runtime/pprof"
 	"time"
 )
 
@@ -67,18 +68,16 @@ func (b *EventWriterBaseImpl) Run(ctx context.Context) {
 		}
 	}
 
-	for {
-		if b.GetPauseChan != nil {
-			pause := b.GetPauseChan()
-			if pause != nil {
-				select {
-				case <-pause:
-				case <-ctx.Done():
-					return
-				}
+	handlePaused := func() {
+		if pause := b.GetPauseChan(); pause != nil {
+			select {
+			case <-pause:
+			case <-ctx.Done():
 			}
 		}
+	}
 
+	for {
 		select {
 		case <-ctx.Done():
 			return
@@ -87,9 +86,11 @@ func (b *EventWriterBaseImpl) Run(ctx context.Context) {
 				return
 			}
 
+			handlePaused()
+
 			if exprRegexp != nil {
 				fileLineCaller := fmt.Sprintf("%s:%d:%s", event.Origin.Filename, event.Origin.Line, event.Origin.Caller)
-				matched := exprRegexp.Match([]byte(fileLineCaller)) || exprRegexp.Match([]byte(event.Origin.MsgSimpleText))
+				matched := exprRegexp.MatchString(fileLineCaller) || exprRegexp.MatchString(event.Origin.MsgSimpleText)
 				if !matched {
 					continue
 				}
@@ -104,7 +105,7 @@ func (b *EventWriterBaseImpl) Run(ctx context.Context) {
 			case io.WriterTo:
 				_, err = msg.WriteTo(b.OutputWriteCloser)
 			default:
-				_, err = b.OutputWriteCloser.Write([]byte(fmt.Sprint(msg)))
+				_, err = fmt.Fprint(b.OutputWriteCloser, msg)
 			}
 			if err != nil {
 				FallbackErrorf("unable to write log message of %q (%v): %v", b.Name, err, event.Msg)
@@ -143,9 +144,17 @@ func eventWriterStartGo(ctx context.Context, w EventWriter, shared bool) {
 	}
 	w.Base().shared = shared
 	w.Base().stopped = make(chan struct{})
+
+	ctxDesc := "Logger: EventWriter: " + w.GetWriterName()
+	if shared {
+		ctxDesc = "Logger: EventWriter (shared): " + w.GetWriterName()
+	}
+	writerCtx, writerCancel := newProcessTypedContext(ctx, ctxDesc)
 	go func() {
+		defer writerCancel()
 		defer close(w.Base().stopped)
-		w.Run(ctx)
+		pprof.SetGoroutineLabels(writerCtx)
+		w.Run(writerCtx)
 	}()
 }
 

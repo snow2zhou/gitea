@@ -4,55 +4,69 @@
 package cmd
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"os"
 
 	"code.gitea.io/gitea/modules/log"
 	"code.gitea.io/gitea/modules/private"
 
-	"github.com/urfave/cli"
+	"github.com/urfave/cli/v3"
 )
 
 var (
 	defaultLoggingFlags = []cli.Flag{
-		cli.StringFlag{
+		&cli.StringFlag{
 			Name:  "logger",
 			Usage: `Logger name - will default to "default"`,
-		}, cli.StringFlag{
+		},
+		&cli.StringFlag{
 			Name:  "writer",
 			Usage: "Name of the log writer - will default to mode",
-		}, cli.StringFlag{
+		},
+		&cli.StringFlag{
 			Name:  "level",
 			Usage: "Logging level for the new logger",
-		}, cli.StringFlag{
-			Name:  "stacktrace-level, L",
-			Usage: "Stacktrace logging level",
-		}, cli.StringFlag{
-			Name:  "flags, F",
-			Usage: "Flags for the logger",
-		}, cli.StringFlag{
-			Name:  "expression, e",
-			Usage: "Matching expression for the logger",
-		}, cli.StringFlag{
-			Name:  "prefix, p",
-			Usage: "Prefix for the logger",
-		}, cli.BoolFlag{
+		},
+		&cli.StringFlag{
+			Name:    "stacktrace-level",
+			Aliases: []string{"L"},
+			Usage:   "Stacktrace logging level",
+		},
+		&cli.StringFlag{
+			Name:    "flags",
+			Aliases: []string{"F"},
+			Usage:   "Flags for the logger",
+		},
+		&cli.StringFlag{
+			Name:    "expression",
+			Aliases: []string{"e"},
+			Usage:   "Matching expression for the logger",
+		},
+		&cli.StringFlag{
+			Name:    "prefix",
+			Aliases: []string{"p"},
+			Usage:   "Prefix for the logger",
+		},
+		&cli.BoolFlag{
 			Name:  "color",
 			Usage: "Use color in the logs",
-		}, cli.BoolFlag{
+		},
+		&cli.BoolFlag{
 			Name: "debug",
 		},
 	}
 
-	subcmdLogging = cli.Command{
+	subcmdLogging = &cli.Command{
 		Name:  "logging",
 		Usage: "Adjust logging commands",
-		Subcommands: []cli.Command{
+		Commands: []*cli.Command{
 			{
 				Name:  "pause",
 				Usage: "Pause logging (Gitea will buffer logs up to a certain point and will drop them after that point)",
 				Flags: []cli.Flag{
-					cli.BoolFlag{
+					&cli.BoolFlag{
 						Name: "debug",
 					},
 				},
@@ -61,7 +75,7 @@ var (
 				Name:  "resume",
 				Usage: "Resume logging",
 				Flags: []cli.Flag{
-					cli.BoolFlag{
+					&cli.BoolFlag{
 						Name: "debug",
 					},
 				},
@@ -70,7 +84,7 @@ var (
 				Name:  "release-and-reopen",
 				Usage: "Cause Gitea to release and re-open files used for logging",
 				Flags: []cli.Flag{
-					cli.BoolFlag{
+					&cli.BoolFlag{
 						Name: "debug",
 					},
 				},
@@ -80,9 +94,9 @@ var (
 				Usage:     "Remove a logger",
 				ArgsUsage: "[name] Name of logger to remove",
 				Flags: []cli.Flag{
-					cli.BoolFlag{
+					&cli.BoolFlag{
 						Name: "debug",
-					}, cli.StringFlag{
+					}, &cli.StringFlag{
 						Name:  "logger",
 						Usage: `Logger name - will default to "default"`,
 					},
@@ -91,32 +105,45 @@ var (
 			}, {
 				Name:  "add",
 				Usage: "Add a logger",
-				Subcommands: []cli.Command{
+				Commands: []*cli.Command{
 					{
 						Name:  "file",
 						Usage: "Add a file logger",
 						Flags: append(defaultLoggingFlags, []cli.Flag{
-							cli.StringFlag{
-								Name:  "filename, f",
-								Usage: "Filename for the logger - this must be set.",
-							}, cli.BoolTFlag{
-								Name:  "rotate, r",
-								Usage: "Rotate logs",
-							}, cli.Int64Flag{
-								Name:  "max-size, s",
-								Usage: "Maximum size in bytes before rotation",
-							}, cli.BoolTFlag{
-								Name:  "daily, d",
-								Usage: "Rotate logs daily",
-							}, cli.IntFlag{
-								Name:  "max-days, D",
-								Usage: "Maximum number of daily logs to keep",
-							}, cli.BoolTFlag{
-								Name:  "compress, z",
-								Usage: "Compress rotated logs",
-							}, cli.IntFlag{
-								Name:  "compression-level, Z",
-								Usage: "Compression level to use",
+							&cli.StringFlag{
+								Name:    "filename",
+								Aliases: []string{"f"},
+								Usage:   "Filename for the logger - this must be set.",
+							},
+							&cli.BoolFlag{
+								Name:    "rotate",
+								Aliases: []string{"r"},
+								Usage:   "Rotate logs",
+							},
+							&cli.Int64Flag{
+								Name:    "max-size",
+								Aliases: []string{"s"},
+								Usage:   "Maximum size in bytes before rotation",
+							},
+							&cli.BoolFlag{
+								Name:    "daily",
+								Aliases: []string{"d"},
+								Usage:   "Rotate logs daily",
+							},
+							&cli.IntFlag{
+								Name:    "max-days",
+								Aliases: []string{"D"},
+								Usage:   "Maximum number of daily logs to keep",
+							},
+							&cli.BoolFlag{
+								Name:    "compress",
+								Aliases: []string{"z"},
+								Usage:   "Compress rotated logs",
+							},
+							&cli.IntFlag{
+								Name:    "compression-level",
+								Aliases: []string{"Z"},
+								Usage:   "Compression level to use",
 							},
 						}...),
 						Action: runAddFileLogger,
@@ -124,18 +151,25 @@ var (
 						Name:  "conn",
 						Usage: "Add a net conn logger",
 						Flags: append(defaultLoggingFlags, []cli.Flag{
-							cli.BoolFlag{
-								Name:  "reconnect-on-message, R",
-								Usage: "Reconnect to host for every message",
-							}, cli.BoolFlag{
-								Name:  "reconnect, r",
-								Usage: "Reconnect to host when connection is dropped",
-							}, cli.StringFlag{
-								Name:  "protocol, P",
-								Usage: "Set protocol to use: tcp, unix, or udp (defaults to tcp)",
-							}, cli.StringFlag{
-								Name:  "address, a",
-								Usage: "Host address and port to connect to (defaults to :7020)",
+							&cli.BoolFlag{
+								Name:    "reconnect-on-message",
+								Aliases: []string{"R"},
+								Usage:   "Reconnect to host for every message",
+							},
+							&cli.BoolFlag{
+								Name:    "reconnect",
+								Aliases: []string{"r"},
+								Usage:   "Reconnect to host when connection is dropped",
+							},
+							&cli.StringFlag{
+								Name:    "protocol",
+								Aliases: []string{"P"},
+								Usage:   "Set protocol to use: tcp, unix, or udp (defaults to tcp)",
+							},
+							&cli.StringFlag{
+								Name:    "address",
+								Aliases: []string{"a"},
+								Usage:   "Host address and port to connect to (defaults to :7020)",
 							},
 						}...),
 						Action: runAddConnLogger,
@@ -145,9 +179,10 @@ var (
 				Name:  "log-sql",
 				Usage: "Set LogSQL",
 				Flags: []cli.Flag{
-					cli.BoolFlag{
+					&cli.BoolFlag{
 						Name: "debug",
-					}, cli.BoolFlag{
+					},
+					&cli.BoolFlag{
 						Name:  "off",
 						Usage: "Switch off SQL logging",
 					},
@@ -158,10 +193,7 @@ var (
 	}
 )
 
-func runRemoveLogger(c *cli.Context) error {
-	ctx, cancel := installSignals()
-	defer cancel()
-
+func runRemoveLogger(ctx context.Context, c *cli.Command) error {
 	setup(ctx, c.Bool("debug"))
 	logger := c.String("logger")
 	if len(logger) == 0 {
@@ -173,12 +205,9 @@ func runRemoveLogger(c *cli.Context) error {
 	return handleCliResponseExtra(extra)
 }
 
-func runAddConnLogger(c *cli.Context) error {
-	ctx, cancel := installSignals()
-	defer cancel()
-
+func runAddConnLogger(ctx context.Context, c *cli.Command) error {
 	setup(ctx, c.Bool("debug"))
-	vals := map[string]interface{}{}
+	vals := map[string]any{}
 	mode := "conn"
 	vals["net"] = "tcp"
 	if c.IsSet("protocol") {
@@ -200,20 +229,17 @@ func runAddConnLogger(c *cli.Context) error {
 	if c.IsSet("reconnect-on-message") {
 		vals["reconnectOnMsg"] = c.Bool("reconnect-on-message")
 	}
-	return commonAddLogger(c, mode, vals)
+	return commonAddLogger(ctx, c, mode, vals)
 }
 
-func runAddFileLogger(c *cli.Context) error {
-	ctx, cancel := installSignals()
-	defer cancel()
-
+func runAddFileLogger(ctx context.Context, c *cli.Command) error {
 	setup(ctx, c.Bool("debug"))
-	vals := map[string]interface{}{}
+	vals := map[string]any{}
 	mode := "file"
 	if c.IsSet("filename") {
 		vals["filename"] = c.String("filename")
 	} else {
-		return fmt.Errorf("filename must be set when creating a file logger")
+		return errors.New("filename must be set when creating a file logger")
 	}
 	if c.IsSet("rotate") {
 		vals["rotate"] = c.Bool("rotate")
@@ -233,10 +259,10 @@ func runAddFileLogger(c *cli.Context) error {
 	if c.IsSet("compression-level") {
 		vals["compressionLevel"] = c.Int("compression-level")
 	}
-	return commonAddLogger(c, mode, vals)
+	return commonAddLogger(ctx, c, mode, vals)
 }
 
-func commonAddLogger(c *cli.Context, mode string, vals map[string]interface{}) error {
+func commonAddLogger(ctx context.Context, c *cli.Command, mode string, vals map[string]any) error {
 	if len(c.String("level")) > 0 {
 		vals["level"] = log.LevelFromString(c.String("level")).String()
 	}
@@ -263,46 +289,33 @@ func commonAddLogger(c *cli.Context, mode string, vals map[string]interface{}) e
 	if c.IsSet("writer") {
 		writer = c.String("writer")
 	}
-	ctx, cancel := installSignals()
-	defer cancel()
 
 	extra := private.AddLogger(ctx, logger, writer, mode, vals)
 	return handleCliResponseExtra(extra)
 }
 
-func runPauseLogging(c *cli.Context) error {
-	ctx, cancel := installSignals()
-	defer cancel()
-
+func runPauseLogging(ctx context.Context, c *cli.Command) error {
 	setup(ctx, c.Bool("debug"))
 	userMsg := private.PauseLogging(ctx)
 	_, _ = fmt.Fprintln(os.Stdout, userMsg)
 	return nil
 }
 
-func runResumeLogging(c *cli.Context) error {
-	ctx, cancel := installSignals()
-	defer cancel()
-
+func runResumeLogging(ctx context.Context, c *cli.Command) error {
 	setup(ctx, c.Bool("debug"))
 	userMsg := private.ResumeLogging(ctx)
 	_, _ = fmt.Fprintln(os.Stdout, userMsg)
 	return nil
 }
 
-func runReleaseReopenLogging(c *cli.Context) error {
-	ctx, cancel := installSignals()
-	defer cancel()
-
+func runReleaseReopenLogging(ctx context.Context, c *cli.Command) error {
 	setup(ctx, c.Bool("debug"))
 	userMsg := private.ReleaseReopenLogging(ctx)
 	_, _ = fmt.Fprintln(os.Stdout, userMsg)
 	return nil
 }
 
-func runSetLogSQL(c *cli.Context) error {
-	ctx, cancel := installSignals()
-	defer cancel()
+func runSetLogSQL(ctx context.Context, c *cli.Command) error {
 	setup(ctx, c.Bool("debug"))
 
 	extra := private.SetLogSQL(ctx, !c.Bool("off"))

@@ -9,7 +9,7 @@ import (
 	"code.gitea.io/gitea/models/unittest"
 	user_model "code.gitea.io/gitea/models/user"
 
-	_ "code.gitea.io/gitea/models" // https://discourse.gitea.io/t/testfixtures-could-not-clean-table-access-no-such-table-access/4137/4
+	_ "code.gitea.io/gitea/models" // https://forum.gitea.com/t/testfixtures-could-not-clean-table-access-no-such-table-access/4137/4
 
 	"github.com/stretchr/testify/assert"
 )
@@ -17,12 +17,12 @@ import (
 func TestUserSettings(t *testing.T) {
 	assert.NoError(t, unittest.PrepareTestDatabase())
 	user1 := unittest.AssertExistsAndLoadBean(t, &user_model.User{ID: 1})
-	pub, priv, err := GetKeyPair(user1)
+	pub, priv, err := GetKeyPair(t.Context(), user1)
 	assert.NoError(t, err)
-	pub1, err := GetPublicKey(user1)
+	pub1, err := GetPublicKey(t.Context(), user1)
 	assert.NoError(t, err)
 	assert.Equal(t, pub, pub1)
-	priv1, err := GetPrivateKey(user1)
+	priv1, err := GetPrivateKey(t.Context(), user1)
 	assert.NoError(t, err)
 	assert.Equal(t, priv, priv1)
 }

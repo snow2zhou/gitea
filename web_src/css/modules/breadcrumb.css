@@ -1,9 +1,10 @@
-.breadcrumb .divider {
-  color: var(--color-text-light-2);
-  margin-left: 3px;
-  margin-right: 3px;
+.breadcrumb {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  overflow-wrap: anywhere;
 }
 
-.breadcrumb > * {
-  display: inline;
+.breadcrumb .breadcrumb-divider {
+  color: var(--color-text-light-2);
 }

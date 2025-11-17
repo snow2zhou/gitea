@@ -10,8 +10,10 @@ import (
 	"io"
 	"testing"
 
+	"code.gitea.io/gitea/modules/util"
+	"code.gitea.io/gitea/modules/zstd"
+
 	"github.com/blakesmith/ar"
-	"github.com/klauspost/compress/zstd"
 	"github.com/stretchr/testify/assert"
 	"github.com/ulikunitz/xz"
 )
@@ -69,56 +71,62 @@ func TestParsePackage(t *testing.T) {
 		tw.Write([]byte("Package: gitea\nVersion: 1.0.0\nArchitecture: amd64\n"))
 		tw.Close()
 
-		t.Run("None", func(t *testing.T) {
-			data := createArchive(map[string][]byte{"control.tar": buf.Bytes()})
+		cases := []struct {
+			Extension     string
+			WriterFactory func(io.Writer) io.WriteCloser
+		}{
+			{
+				Extension: "",
+				WriterFactory: func(w io.Writer) io.WriteCloser {
+					return util.NopCloser{Writer: w}
+				},
+			},
+			{
+				Extension: ".gz",
+				WriterFactory: func(w io.Writer) io.WriteCloser {
+					return gzip.NewWriter(w)
+				},
+			},
+			{
+				Extension: ".xz",
+				WriterFactory: func(w io.Writer) io.WriteCloser {
+					xw, _ := xz.NewWriter(w)
+					return xw
+				},
+			},
+			{
+				Extension: ".zst",
+				WriterFactory: func(w io.Writer) io.WriteCloser {
+					zw, _ := zstd.NewWriter(w)
+					return zw
+				},
+			},
+		}
 
-			p, err := ParsePackage(data)
-			assert.NotNil(t, p)
-			assert.NoError(t, err)
-			assert.Equal(t, "gitea", p.Name)
-		})
+		for _, c := range cases {
+			t.Run(c.Extension, func(t *testing.T) {
+				var cbuf bytes.Buffer
+				w := c.WriterFactory(&cbuf)
+				w.Write(buf.Bytes())
+				w.Close()
 
-		t.Run("gz", func(t *testing.T) {
-			var zbuf bytes.Buffer
-			zw := gzip.NewWriter(&zbuf)
-			zw.Write(buf.Bytes())
-			zw.Close()
+				data := createArchive(map[string][]byte{"control.tar" + c.Extension: cbuf.Bytes()})
 
-			data := createArchive(map[string][]byte{"control.tar.gz": zbuf.Bytes()})
+				p, err := ParsePackage(data)
+				assert.NotNil(t, p)
+				assert.NoError(t, err)
+				assert.Equal(t, "gitea", p.Name)
 
-			p, err := ParsePackage(data)
-			assert.NotNil(t, p)
-			assert.NoError(t, err)
-			assert.Equal(t, "gitea", p.Name)
-		})
+				t.Run("TrailingSlash", func(t *testing.T) {
+					data := createArchive(map[string][]byte{"control.tar" + c.Extension + "/": cbuf.Bytes()})
 
-		t.Run("xz", func(t *testing.T) {
-			var xbuf bytes.Buffer
-			xw, _ := xz.NewWriter(&xbuf)
-			xw.Write(buf.Bytes())
-			xw.Close()
-
-			data := createArchive(map[string][]byte{"control.tar.xz": xbuf.Bytes()})
-
-			p, err := ParsePackage(data)
-			assert.NotNil(t, p)
-			assert.NoError(t, err)
-			assert.Equal(t, "gitea", p.Name)
-		})
-
-		t.Run("zst", func(t *testing.T) {
-			var zbuf bytes.Buffer
-			zw, _ := zstd.NewWriter(&zbuf)
-			zw.Write(buf.Bytes())
-			zw.Close()
-
-			data := createArchive(map[string][]byte{"control.tar.zst": zbuf.Bytes()})
-
-			p, err := ParsePackage(data)
-			assert.NotNil(t, p)
-			assert.NoError(t, err)
-			assert.Equal(t, "gitea", p.Name)
-		})
+					p, err := ParsePackage(data)
+					assert.NotNil(t, p)
+					assert.NoError(t, err)
+					assert.Equal(t, "gitea", p.Name)
+				})
+			})
+		}
 	})
 }
 
@@ -167,5 +175,13 @@ func TestParseControlFile(t *testing.T) {
 		assert.Equal(t, packageAuthor, p.Metadata.Maintainer)
 		assert.Equal(t, []string{"a", "b"}, p.Metadata.Dependencies)
 		assert.Equal(t, full, p.Control)
+	})
+
+	t.Run("ValidVersions", func(t *testing.T) {
+		for _, version := range []string{"1.0", "0:1.2", "9:1.0", "10:1.0", "900:1a.2b-x-y_z~1+2"} {
+			p, err := ParseControlFile(buildContent("testpkg", version, "amd64"))
+			assert.NoError(t, err, "ParseControlFile with version %q", version)
+			assert.NotNil(t, p)
+		}
 	})
 }

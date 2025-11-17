@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"code.gitea.io/gitea/modules/log"
+	"code.gitea.io/gitea/modules/setting"
 	"code.gitea.io/gitea/modules/util"
 
 	"github.com/minio/minio-go/v7"
@@ -41,25 +42,9 @@ func (m *minioObject) Stat() (os.FileInfo, error) {
 	return &minioFileInfo{oi}, nil
 }
 
-// MinioStorageType is the type descriptor for minio storage
-const MinioStorageType Type = "minio"
-
-// MinioStorageConfig represents the configuration for a minio storage
-type MinioStorageConfig struct {
-	Endpoint           string `ini:"MINIO_ENDPOINT"`
-	AccessKeyID        string `ini:"MINIO_ACCESS_KEY_ID"`
-	SecretAccessKey    string `ini:"MINIO_SECRET_ACCESS_KEY"`
-	Bucket             string `ini:"MINIO_BUCKET"`
-	Location           string `ini:"MINIO_LOCATION"`
-	BasePath           string `ini:"MINIO_BASE_PATH"`
-	UseSSL             bool   `ini:"MINIO_USE_SSL"`
-	InsecureSkipVerify bool   `ini:"MINIO_INSECURE_SKIP_VERIFY"`
-	ChecksumAlgorithm  string `ini:"MINIO_CHECKSUM_ALGORITHM"`
-}
-
 // MinioStorage returns a minio bucket storage
 type MinioStorage struct {
-	cfg      *MinioStorageConfig
+	cfg      *setting.MinioStorageConfig
 	ctx      context.Context
 	client   *minio.Client
 	bucket   string
@@ -86,35 +71,70 @@ func convertMinioErr(err error) error {
 	return err
 }
 
-// NewMinioStorage returns a minio storage
-func NewMinioStorage(ctx context.Context, cfg interface{}) (ObjectStorage, error) {
-	configInterface, err := toConfig(MinioStorageConfig{}, cfg)
-	if err != nil {
-		return nil, convertMinioErr(err)
-	}
-	config := configInterface.(MinioStorageConfig)
+var getBucketVersioning = func(ctx context.Context, minioClient *minio.Client, bucket string) error {
+	_, err := minioClient.GetBucketVersioning(ctx, bucket)
+	return err
+}
 
+// NewMinioStorage returns a minio storage
+func NewMinioStorage(ctx context.Context, cfg *setting.Storage) (ObjectStorage, error) {
+	config := cfg.MinioConfig
 	if config.ChecksumAlgorithm != "" && config.ChecksumAlgorithm != "default" && config.ChecksumAlgorithm != "md5" {
 		return nil, fmt.Errorf("invalid minio checksum algorithm: %s", config.ChecksumAlgorithm)
 	}
 
 	log.Info("Creating Minio storage at %s:%s with base path %s", config.Endpoint, config.Bucket, config.BasePath)
 
+	var lookup minio.BucketLookupType
+	switch config.BucketLookUpType {
+	case "auto", "":
+		lookup = minio.BucketLookupAuto
+	case "dns":
+		lookup = minio.BucketLookupDNS
+	case "path":
+		lookup = minio.BucketLookupPath
+	default:
+		return nil, fmt.Errorf("invalid minio bucket lookup type: %s", config.BucketLookUpType)
+	}
+
 	minioClient, err := minio.New(config.Endpoint, &minio.Options{
-		Creds:     credentials.NewStaticV4(config.AccessKeyID, config.SecretAccessKey, ""),
-		Secure:    config.UseSSL,
-		Transport: &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: config.InsecureSkipVerify}},
+		Creds:        buildMinioCredentials(config),
+		Secure:       config.UseSSL,
+		Transport:    &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: config.InsecureSkipVerify}},
+		Region:       config.Location,
+		BucketLookup: lookup,
 	})
 	if err != nil {
 		return nil, convertMinioErr(err)
 	}
 
-	if err := minioClient.MakeBucket(ctx, config.Bucket, minio.MakeBucketOptions{
-		Region: config.Location,
-	}); err != nil {
-		// Check to see if we already own this bucket (which happens if you run this twice)
-		exists, errBucketExists := minioClient.BucketExists(ctx, config.Bucket)
-		if !exists || errBucketExists != nil {
+	// The GetBucketVersioning is only used for checking whether the Object Storage parameters are generally good. It doesn't need to succeed.
+	// The assumption is that if the API returns the HTTP code 400, then the parameters could be incorrect.
+	// Otherwise even if the request itself fails (403, 404, etc), the code should still continue because the parameters seem "good" enough.
+	// Keep in mind that GetBucketVersioning requires "owner" to really succeed, so it can't be used to check the existence.
+	// Not using "BucketExists (HeadBucket)" because it doesn't include detailed failure reasons.
+	err = getBucketVersioning(ctx, minioClient, config.Bucket)
+	if err != nil {
+		errResp, ok := err.(minio.ErrorResponse)
+		if !ok {
+			return nil, err
+		}
+		if errResp.StatusCode == http.StatusBadRequest {
+			log.Error("S3 storage connection failure at %s:%s with base path %s and region: %s", config.Endpoint, config.Bucket, config.Location, errResp.Message)
+			return nil, err
+		}
+	}
+
+	// Check to see if we already own this bucket
+	exists, err := minioClient.BucketExists(ctx, config.Bucket)
+	if err != nil {
+		return nil, convertMinioErr(err)
+	}
+
+	if !exists {
+		if err := minioClient.MakeBucket(ctx, config.Bucket, minio.MakeBucketOptions{
+			Region: config.Location,
+		}); err != nil {
 			return nil, convertMinioErr(err)
 		}
 	}
@@ -129,11 +149,51 @@ func NewMinioStorage(ctx context.Context, cfg interface{}) (ObjectStorage, error
 }
 
 func (m *MinioStorage) buildMinioPath(p string) string {
-	p = util.PathJoinRelX(m.basePath, p)
+	p = strings.TrimPrefix(util.PathJoinRelX(m.basePath, p), "/") // object store doesn't use slash for root path
 	if p == "." {
-		p = "" // minio doesn't use dot as relative path
+		p = "" // object store doesn't use dot as relative path
 	}
 	return p
+}
+
+func (m *MinioStorage) buildMinioDirPrefix(p string) string {
+	// ending slash is required for avoiding matching like "foo/" and "foobar/" with prefix "foo"
+	p = m.buildMinioPath(p) + "/"
+	if p == "/" {
+		p = "" // object store doesn't use slash for root path
+	}
+	return p
+}
+
+func buildMinioCredentials(config setting.MinioStorageConfig) *credentials.Credentials {
+	// If static credentials are provided, use those
+	if config.AccessKeyID != "" {
+		return credentials.NewStaticV4(config.AccessKeyID, config.SecretAccessKey, "")
+	}
+
+	// Otherwise, fallback to a credentials chain for S3 access
+	chain := []credentials.Provider{
+		// configure based upon MINIO_ prefixed environment variables
+		&credentials.EnvMinio{},
+		// configure based upon AWS_ prefixed environment variables
+		&credentials.EnvAWS{},
+		// read credentials from MINIO_SHARED_CREDENTIALS_FILE
+		// environment variable, or default json config files
+		&credentials.FileMinioClient{},
+		// read credentials from AWS_SHARED_CREDENTIALS_FILE
+		// environment variable, or default credentials file
+		&credentials.FileAWSCredentials{},
+		// read IAM role from EC2 metadata endpoint if available
+		&credentials.IAM{
+			// passing in an empty Endpoint lets the IAM Provider
+			// decide which endpoint to resolve internally
+			Endpoint: config.IamEndpoint,
+			Client: &http.Client{
+				Transport: http.DefaultTransport,
+			},
+		},
+	}
+	return credentials.NewChainCredentials(chain)
 }
 
 // Open opens a file
@@ -193,7 +253,7 @@ func (m minioFileInfo) Mode() os.FileMode {
 	return os.ModePerm
 }
 
-func (m minioFileInfo) Sys() interface{} {
+func (m minioFileInfo) Sys() any {
 	return nil
 }
 
@@ -219,31 +279,55 @@ func (m *MinioStorage) Delete(path string) error {
 }
 
 // URL gets the redirect URL to a file. The presigned link is valid for 5 minutes.
-func (m *MinioStorage) URL(path, name string) (*url.URL, error) {
-	reqParams := make(url.Values)
-	// TODO it may be good to embed images with 'inline' like ServeData does, but we don't want to have to read the file, do we?
-	reqParams.Set("response-content-disposition", "attachment; filename=\""+quoteEscaper.Replace(name)+"\"")
-	u, err := m.client.PresignedGetObject(m.ctx, m.bucket, m.buildMinioPath(path), 5*time.Minute, reqParams)
+func (m *MinioStorage) URL(storePath, name, method string, serveDirectReqParams url.Values) (*url.URL, error) {
+	// copy serveDirectReqParams
+	reqParams, err := url.ParseQuery(serveDirectReqParams.Encode())
+	if err != nil {
+		return nil, err
+	}
+
+	// Here we might not know the real filename, and it's quite inefficient to detect the mine type by pre-fetching the object head.
+	// So we just do a quick detection by extension name, at least if works for the "View Raw File" for an LFS file on the Web UI.
+	// Detect content type by extension name, only support the well-known safe types for inline rendering.
+	// TODO: OBJECT-STORAGE-CONTENT-TYPE: need a complete solution and refactor for Azure in the future
+	ext := path.Ext(name)
+	inlineExtMimeTypes := map[string]string{
+		".png":  "image/png",
+		".jpg":  "image/jpeg",
+		".jpeg": "image/jpeg",
+		".gif":  "image/gif",
+		".webp": "image/webp",
+		".avif": "image/avif",
+		// ATTENTION! Don't support unsafe types like HTML/SVG due to security concerns: they can contain JS code, and maybe they need proper Content-Security-Policy
+		// HINT: PDF-RENDER-SANDBOX: PDF won't render in sandboxed context, it seems fine to render it inline
+		".pdf": "application/pdf",
+
+		// TODO: refactor with "modules/public/mime_types.go", for example: "DetectWellKnownSafeInlineMimeType"
+	}
+	if mimeType, ok := inlineExtMimeTypes[ext]; ok {
+		reqParams.Set("response-content-type", mimeType)
+		reqParams.Set("response-content-disposition", "inline")
+	} else {
+		reqParams.Set("response-content-disposition", fmt.Sprintf(`attachment; filename="%s"`, quoteEscaper.Replace(name)))
+	}
+
+	expires := 5 * time.Minute
+	if method == http.MethodHead {
+		u, err := m.client.PresignedHeadObject(m.ctx, m.bucket, m.buildMinioPath(storePath), expires, reqParams)
+		return u, convertMinioErr(err)
+	}
+	u, err := m.client.PresignedGetObject(m.ctx, m.bucket, m.buildMinioPath(storePath), expires, reqParams)
 	return u, convertMinioErr(err)
 }
 
 // IterateObjects iterates across the objects in the miniostorage
 func (m *MinioStorage) IterateObjects(dirName string, fn func(path string, obj Object) error) error {
 	opts := minio.GetObjectOptions{}
-	lobjectCtx, cancel := context.WithCancel(m.ctx)
-	defer cancel()
-
-	basePath := m.basePath
-	if dirName != "" {
-		// ending slash is required for avoiding matching like "foo/" and "foobar/" with prefix "foo"
-		basePath = m.buildMinioPath(dirName) + "/"
-	}
-
-	for mObjInfo := range m.client.ListObjects(lobjectCtx, m.bucket, minio.ListObjectsOptions{
-		Prefix:    basePath,
+	for mObjInfo := range m.client.ListObjects(m.ctx, m.bucket, minio.ListObjectsOptions{
+		Prefix:    m.buildMinioDirPrefix(dirName),
 		Recursive: true,
 	}) {
-		object, err := m.client.GetObject(lobjectCtx, m.bucket, mObjInfo.Key, opts)
+		object, err := m.client.GetObject(m.ctx, m.bucket, mObjInfo.Key, opts)
 		if err != nil {
 			return convertMinioErr(err)
 		}
@@ -258,5 +342,5 @@ func (m *MinioStorage) IterateObjects(dirName string, fn func(path string, obj O
 }
 
 func init() {
-	RegisterStorageType(MinioStorageType, NewMinioStorage)
+	RegisterStorageType(setting.MinioStorageType, NewMinioStorage)
 }

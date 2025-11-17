@@ -16,10 +16,12 @@ import (
 // RenderConfig represents rendering configuration for this file
 type RenderConfig struct {
 	Meta     markup.RenderMetaMode
-	Icon     string
 	TOC      string // "false": hide,  "side"/empty: in sidebar,  "main"/"true": in main view
 	Lang     string
 	yamlNode *yaml.Node
+
+	// Used internally.  Cannot be controlled by frontmatter.
+	metaLength int
 }
 
 func renderMetaModeFromString(s string) markup.RenderMetaMode {
@@ -71,7 +73,7 @@ func (rc *RenderConfig) UnmarshalYAML(value *yaml.Node) error {
 
 	type yamlRenderConfig struct {
 		Meta *string `yaml:"meta"`
-		Icon *string `yaml:"details_icon"`
+		Icon *string `yaml:"details_icon"` // deprecated, because there is no font icon, so no custom icon
 		TOC  *string `yaml:"include_toc"`
 		Lang *string `yaml:"lang"`
 	}
@@ -93,10 +95,6 @@ func (rc *RenderConfig) UnmarshalYAML(value *yaml.Node) error {
 		rc.Meta = renderMetaModeFromString(*cfg.Gitea.Meta)
 	}
 
-	if cfg.Gitea.Icon != nil {
-		rc.Icon = strings.TrimSpace(strings.ToLower(*cfg.Gitea.Icon))
-	}
-
 	if cfg.Gitea.Lang != nil && *cfg.Gitea.Lang != "" {
 		rc.Lang = *cfg.Gitea.Lang
 	}
@@ -108,7 +106,7 @@ func (rc *RenderConfig) UnmarshalYAML(value *yaml.Node) error {
 	return nil
 }
 
-func (rc *RenderConfig) toMetaNode() ast.Node {
+func (rc *RenderConfig) toMetaNode(g *ASTTransformer) ast.Node {
 	if rc.yamlNode == nil {
 		return nil
 	}
@@ -116,7 +114,7 @@ func (rc *RenderConfig) toMetaNode() ast.Node {
 	case markup.RenderMetaAsTable:
 		return nodeToTable(rc.yamlNode)
 	case markup.RenderMetaAsDetails:
-		return nodeToDetails(rc.yamlNode, rc.Icon)
+		return nodeToDetails(g, rc.yamlNode)
 	default:
 		return nil
 	}

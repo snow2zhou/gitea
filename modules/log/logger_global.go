@@ -10,7 +10,7 @@ import (
 
 // FallbackErrorf is the last chance to show an error if the logger has internal errors
 func FallbackErrorf(format string, args ...any) {
-	_, _ = fmt.Fprintf(os.Stderr, format+"\n", args)
+	_, _ = fmt.Fprintf(os.Stderr, format+"\n", args...)
 }
 
 func GetLevel() Level {
@@ -18,7 +18,8 @@ func GetLevel() Level {
 }
 
 func Log(skip int, level Level, format string, v ...any) {
-	GetLogger(DEFAULT).Log(skip+1, level, format, v...)
+	// codeql[disable-next-line=go/clear-text-logging]
+	GetLogger(DEFAULT).Log(skip+1, &Event{Level: level}, format, v...)
 }
 
 func Trace(format string, v ...any) {
@@ -57,11 +58,13 @@ func Critical(format string, v ...any) {
 	Log(1, ERROR, format, v...)
 }
 
+var OsExiter = os.Exit
+
 // Fatal records fatal log and exit process
 func Fatal(format string, v ...any) {
 	Log(1, FATAL, format, v...)
 	GetManager().Close()
-	os.Exit(1)
+	OsExiter(1)
 }
 
 func GetLogger(name string) Logger {
@@ -79,5 +82,5 @@ func SetConsoleLogger(loggerName, writerName string, level Level) {
 		Colorize:     CanColorStdout,
 		WriterOption: WriterConsoleOption{},
 	})
-	GetManager().GetLogger(loggerName).RemoveAllWriters().AddWriters(writer)
+	GetManager().GetLogger(loggerName).ReplaceAllWriters(writer)
 }

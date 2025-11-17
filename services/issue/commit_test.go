@@ -60,7 +60,7 @@ func TestUpdateIssuesCommit(t *testing.T) {
 
 	unittest.AssertNotExistsBean(t, commentBean)
 	unittest.AssertNotExistsBean(t, &issues_model.Issue{RepoID: repo.ID, Index: 2}, "is_closed=1")
-	assert.NoError(t, UpdateIssuesCommit(user, repo, pushCommits, repo.DefaultBranch))
+	assert.NoError(t, UpdateIssuesCommit(t.Context(), user, repo, pushCommits, repo.DefaultBranch))
 	unittest.AssertExistsAndLoadBean(t, commentBean)
 	unittest.AssertExistsAndLoadBean(t, issueBean, "is_closed=1")
 	unittest.CheckConsistencyFor(t, &activities_model.Action{})
@@ -87,7 +87,7 @@ func TestUpdateIssuesCommit(t *testing.T) {
 
 	unittest.AssertNotExistsBean(t, commentBean)
 	unittest.AssertNotExistsBean(t, &issues_model.Issue{RepoID: repo.ID, Index: 1}, "is_closed=1")
-	assert.NoError(t, UpdateIssuesCommit(user, repo, pushCommits, "non-existing-branch"))
+	assert.NoError(t, UpdateIssuesCommit(t.Context(), user, repo, pushCommits, "non-existing-branch"))
 	unittest.AssertExistsAndLoadBean(t, commentBean)
 	unittest.AssertNotExistsBean(t, issueBean, "is_closed=1")
 	unittest.CheckConsistencyFor(t, &activities_model.Action{})
@@ -113,7 +113,7 @@ func TestUpdateIssuesCommit(t *testing.T) {
 
 	unittest.AssertNotExistsBean(t, commentBean)
 	unittest.AssertNotExistsBean(t, &issues_model.Issue{RepoID: repo.ID, Index: 1}, "is_closed=1")
-	assert.NoError(t, UpdateIssuesCommit(user, repo, pushCommits, repo.DefaultBranch))
+	assert.NoError(t, UpdateIssuesCommit(t.Context(), user, repo, pushCommits, repo.DefaultBranch))
 	unittest.AssertExistsAndLoadBean(t, commentBean)
 	unittest.AssertExistsAndLoadBean(t, issueBean, "is_closed=1")
 	unittest.CheckConsistencyFor(t, &activities_model.Action{})
@@ -139,7 +139,7 @@ func TestUpdateIssuesCommit_Colon(t *testing.T) {
 	issueBean := &issues_model.Issue{RepoID: repo.ID, Index: 4}
 
 	unittest.AssertNotExistsBean(t, &issues_model.Issue{RepoID: repo.ID, Index: 2}, "is_closed=1")
-	assert.NoError(t, UpdateIssuesCommit(user, repo, pushCommits, repo.DefaultBranch))
+	assert.NoError(t, UpdateIssuesCommit(t.Context(), user, repo, pushCommits, repo.DefaultBranch))
 	unittest.AssertExistsAndLoadBean(t, issueBean, "is_closed=1")
 	unittest.CheckConsistencyFor(t, &activities_model.Action{})
 }
@@ -172,7 +172,7 @@ func TestUpdateIssuesCommit_Issue5957(t *testing.T) {
 
 	unittest.AssertNotExistsBean(t, commentBean)
 	unittest.AssertNotExistsBean(t, issueBean, "is_closed=1")
-	assert.NoError(t, UpdateIssuesCommit(user, repo, pushCommits, "non-existing-branch"))
+	assert.NoError(t, UpdateIssuesCommit(t.Context(), user, repo, pushCommits, "non-existing-branch"))
 	unittest.AssertExistsAndLoadBean(t, commentBean)
 	unittest.AssertExistsAndLoadBean(t, issueBean, "is_closed=1")
 	unittest.CheckConsistencyFor(t, &activities_model.Action{})
@@ -207,7 +207,7 @@ func TestUpdateIssuesCommit_AnotherRepo(t *testing.T) {
 
 	unittest.AssertNotExistsBean(t, commentBean)
 	unittest.AssertNotExistsBean(t, issueBean, "is_closed=1")
-	assert.NoError(t, UpdateIssuesCommit(user, repo, pushCommits, repo.DefaultBranch))
+	assert.NoError(t, UpdateIssuesCommit(t.Context(), user, repo, pushCommits, repo.DefaultBranch))
 	unittest.AssertExistsAndLoadBean(t, commentBean)
 	unittest.AssertExistsAndLoadBean(t, issueBean, "is_closed=1")
 	unittest.CheckConsistencyFor(t, &activities_model.Action{})
@@ -242,7 +242,7 @@ func TestUpdateIssuesCommit_AnotherRepo_FullAddress(t *testing.T) {
 
 	unittest.AssertNotExistsBean(t, commentBean)
 	unittest.AssertNotExistsBean(t, issueBean, "is_closed=1")
-	assert.NoError(t, UpdateIssuesCommit(user, repo, pushCommits, repo.DefaultBranch))
+	assert.NoError(t, UpdateIssuesCommit(t.Context(), user, repo, pushCommits, repo.DefaultBranch))
 	unittest.AssertExistsAndLoadBean(t, commentBean)
 	unittest.AssertExistsAndLoadBean(t, issueBean, "is_closed=1")
 	unittest.CheckConsistencyFor(t, &activities_model.Action{})
@@ -261,7 +261,7 @@ func TestUpdateIssuesCommit_AnotherRepoNoPermission(t *testing.T) {
 			CommitterName:  "User Ten",
 			AuthorEmail:    "user10@example.com",
 			AuthorName:     "User Ten",
-			Message:        "close user3/repo3#1",
+			Message:        "close org3/repo3#1",
 		},
 		{
 			Sha1:           "abcdef4",
@@ -269,7 +269,7 @@ func TestUpdateIssuesCommit_AnotherRepoNoPermission(t *testing.T) {
 			CommitterName:  "User Ten",
 			AuthorEmail:    "user10@example.com",
 			AuthorName:     "User Ten",
-			Message:        "close " + setting.AppURL + "user3/repo3/issues/1",
+			Message:        "close " + setting.AppURL + "org3/repo3/issues/1",
 		},
 	}
 
@@ -292,7 +292,7 @@ func TestUpdateIssuesCommit_AnotherRepoNoPermission(t *testing.T) {
 	unittest.AssertNotExistsBean(t, commentBean)
 	unittest.AssertNotExistsBean(t, commentBean2)
 	unittest.AssertNotExistsBean(t, issueBean, "is_closed=1")
-	assert.NoError(t, UpdateIssuesCommit(user, repo, pushCommits, repo.DefaultBranch))
+	assert.NoError(t, UpdateIssuesCommit(t.Context(), user, repo, pushCommits, repo.DefaultBranch))
 	unittest.AssertNotExistsBean(t, commentBean)
 	unittest.AssertNotExistsBean(t, commentBean2)
 	unittest.AssertNotExistsBean(t, issueBean, "is_closed=1")

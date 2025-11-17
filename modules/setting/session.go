@@ -5,12 +5,12 @@ package setting
 
 import (
 	"net/http"
-	"path"
 	"path/filepath"
 	"strings"
 
 	"code.gitea.io/gitea/modules/json"
 	"code.gitea.io/gitea/modules/log"
+	"code.gitea.io/gitea/modules/util"
 )
 
 // SessionConfig defines Session settings
@@ -21,7 +21,7 @@ var SessionConfig = struct {
 	ProviderConfig string
 	// Cookie name to save session ID. Default is "MacaronSession".
 	CookieName string
-	// Cookie path to store. Default is "/". HINT: there was a bug, the old value doesn't have trailing slash, and could be empty "".
+	// Cookie path to store. Default is "/".
 	CookiePath string
 	// GC interval time in seconds. Default is 3600.
 	Gclifetime int64
@@ -44,13 +44,15 @@ func loadSessionFrom(rootCfg ConfigProvider) {
 	sec := rootCfg.Section("session")
 	SessionConfig.Provider = sec.Key("PROVIDER").In("memory",
 		[]string{"memory", "file", "redis", "mysql", "postgres", "couchbase", "memcache", "db"})
-	SessionConfig.ProviderConfig = strings.Trim(sec.Key("PROVIDER_CONFIG").MustString(path.Join(AppDataPath, "sessions")), "\" ")
+	SessionConfig.ProviderConfig = strings.Trim(sec.Key("PROVIDER_CONFIG").MustString(filepath.Join(AppDataPath, "sessions")), "\" ")
 	if SessionConfig.Provider == "file" && !filepath.IsAbs(SessionConfig.ProviderConfig) {
-		SessionConfig.ProviderConfig = path.Join(AppWorkPath, SessionConfig.ProviderConfig)
+		SessionConfig.ProviderConfig = filepath.Join(AppWorkPath, SessionConfig.ProviderConfig)
+		checkOverlappedPath("[session].PROVIDER_CONFIG", SessionConfig.ProviderConfig)
 	}
 	SessionConfig.CookieName = sec.Key("COOKIE_NAME").MustString("i_like_gitea")
-	SessionConfig.CookiePath = AppSubURL + "/" // there was a bug, old code only set CookePath=AppSubURL, no trailing slash
-	SessionConfig.Secure = sec.Key("COOKIE_SECURE").MustBool(false)
+	// HINT: INSTALL-PAGE-COOKIE-INIT: the cookie system is not properly initialized on the Install page, so there is no CookiePath
+	SessionConfig.CookiePath = util.IfZero(AppSubURL, "/")
+	SessionConfig.Secure = sec.Key("COOKIE_SECURE").MustBool(strings.HasPrefix(strings.ToLower(AppURL), "https://"))
 	SessionConfig.Gclifetime = sec.Key("GC_INTERVAL_TIME").MustInt64(86400)
 	SessionConfig.Maxlifetime = sec.Key("SESSION_LIFE_TIME").MustInt64(86400)
 	SessionConfig.Domain = sec.Key("DOMAIN").String()
@@ -70,6 +72,4 @@ func loadSessionFrom(rootCfg ConfigProvider) {
 	SessionConfig.ProviderConfig = string(shadowConfig)
 	SessionConfig.OriginalProvider = SessionConfig.Provider
 	SessionConfig.Provider = "VirtualSession"
-
-	log.Info("Session Service Enabled")
 }

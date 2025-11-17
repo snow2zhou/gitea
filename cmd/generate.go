@@ -5,56 +5,57 @@
 package cmd
 
 import (
+	"context"
 	"fmt"
 	"os"
 
 	"code.gitea.io/gitea/modules/generate"
 
 	"github.com/mattn/go-isatty"
-	"github.com/urfave/cli"
+	"github.com/urfave/cli/v3"
 )
 
 var (
 	// CmdGenerate represents the available generate sub-command.
-	CmdGenerate = cli.Command{
+	CmdGenerate = &cli.Command{
 		Name:  "generate",
-		Usage: "Command line interface for running generators",
-		Subcommands: []cli.Command{
+		Usage: "Generate Gitea's secrets/keys/tokens",
+		Commands: []*cli.Command{
 			subcmdSecret,
 		},
 	}
 
-	subcmdSecret = cli.Command{
+	subcmdSecret = &cli.Command{
 		Name:  "secret",
 		Usage: "Generate a secret token",
-		Subcommands: []cli.Command{
+		Commands: []*cli.Command{
 			microcmdGenerateInternalToken,
 			microcmdGenerateLfsJwtSecret,
 			microcmdGenerateSecretKey,
 		},
 	}
 
-	microcmdGenerateInternalToken = cli.Command{
+	microcmdGenerateInternalToken = &cli.Command{
 		Name:   "INTERNAL_TOKEN",
 		Usage:  "Generate a new INTERNAL_TOKEN",
 		Action: runGenerateInternalToken,
 	}
 
-	microcmdGenerateLfsJwtSecret = cli.Command{
+	microcmdGenerateLfsJwtSecret = &cli.Command{
 		Name:    "JWT_SECRET",
 		Aliases: []string{"LFS_JWT_SECRET"},
 		Usage:   "Generate a new JWT_SECRET",
 		Action:  runGenerateLfsJwtSecret,
 	}
 
-	microcmdGenerateSecretKey = cli.Command{
+	microcmdGenerateSecretKey = &cli.Command{
 		Name:   "SECRET_KEY",
 		Usage:  "Generate a new SECRET_KEY",
 		Action: runGenerateSecretKey,
 	}
 )
 
-func runGenerateInternalToken(c *cli.Context) error {
+func runGenerateInternalToken(_ context.Context, c *cli.Command) error {
 	internalToken, err := generate.NewInternalToken()
 	if err != nil {
 		return err
@@ -69,13 +70,13 @@ func runGenerateInternalToken(c *cli.Context) error {
 	return nil
 }
 
-func runGenerateLfsJwtSecret(c *cli.Context) error {
-	JWTSecretBase64, err := generate.NewJwtSecretBase64()
+func runGenerateLfsJwtSecret(_ context.Context, c *cli.Command) error {
+	_, jwtSecretBase64, err := generate.NewJwtSecretWithBase64()
 	if err != nil {
 		return err
 	}
 
-	fmt.Printf("%s", JWTSecretBase64)
+	fmt.Printf("%s", jwtSecretBase64)
 
 	if isatty.IsTerminal(os.Stdout.Fd()) {
 		fmt.Printf("\n")
@@ -84,12 +85,13 @@ func runGenerateLfsJwtSecret(c *cli.Context) error {
 	return nil
 }
 
-func runGenerateSecretKey(c *cli.Context) error {
+func runGenerateSecretKey(_ context.Context, c *cli.Command) error {
 	secretKey, err := generate.NewSecretKey()
 	if err != nil {
 		return err
 	}
 
+	// codeql[disable-next-line=go/clear-text-logging]
 	fmt.Printf("%s", secretKey)
 
 	if isatty.IsTerminal(os.Stdout.Fd()) {

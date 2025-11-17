@@ -6,6 +6,7 @@ package templates
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -28,6 +29,8 @@ import (
 
 type TemplateExecutor scopedtmpl.TemplateExecutor
 
+type TplName string
+
 type HTMLRender struct {
 	templates atomic.Pointer[scopedtmpl.ScopedTemplate]
 }
@@ -39,27 +42,29 @@ var (
 
 var ErrTemplateNotInitialized = errors.New("template system is not initialized, check your log for errors")
 
-func (h *HTMLRender) HTML(w io.Writer, status int, name string, data interface{}) error {
+func (h *HTMLRender) HTML(w io.Writer, status int, tplName TplName, data any, ctx context.Context) error { //nolint:revive // we don't use ctx, only pass it to the template executor
+	name := string(tplName)
 	if respWriter, ok := w.(http.ResponseWriter); ok {
 		if respWriter.Header().Get("Content-Type") == "" {
 			respWriter.Header().Set("Content-Type", "text/html; charset=utf-8")
 		}
 		respWriter.WriteHeader(status)
 	}
-	t, err := h.TemplateLookup(name)
+	t, err := h.TemplateLookup(name, ctx)
 	if err != nil {
 		return texttemplate.ExecError{Name: name, Err: err}
 	}
 	return t.Execute(w, data)
 }
 
-func (h *HTMLRender) TemplateLookup(name string) (TemplateExecutor, error) {
+func (h *HTMLRender) TemplateLookup(name string, ctx context.Context) (TemplateExecutor, error) { //nolint:revive // we don't use ctx, only pass it to the template executor
 	tmpls := h.templates.Load()
 	if tmpls == nil {
 		return nil, ErrTemplateNotInitialized
 	}
-
-	return tmpls.Executor(name, NewFuncMap())
+	m := NewFuncMap()
+	m["ctx"] = func() any { return ctx }
+	return tmpls.Executor(name, m)
 }
 
 func (h *HTMLRender) CompileTemplates() error {
@@ -97,6 +102,7 @@ func HTMLRenderer() *HTMLRender {
 }
 
 func ReloadHTMLTemplates() error {
+	log.Trace("Reloading HTML templates")
 	if err := htmlRender.CompileTemplates(); err != nil {
 		log.Error("Template error: %v\n%s", err, log.Stack(2))
 		return err
@@ -114,11 +120,11 @@ func initHTMLRenderer() {
 	htmlRender = &HTMLRender{}
 	if err := htmlRender.CompileTemplates(); err != nil {
 		p := &templateErrorPrettier{assets: AssetFS()}
-		wrapFatal(p.handleFuncNotDefinedError(err))
-		wrapFatal(p.handleUnexpectedOperandError(err))
-		wrapFatal(p.handleExpectedEndError(err))
-		wrapFatal(p.handleGenericTemplateError(err))
-		log.Fatal("HTMLRenderer CompileTemplates error: %v", err)
+		wrapTmplErrMsg(p.handleFuncNotDefinedError(err))
+		wrapTmplErrMsg(p.handleUnexpectedOperandError(err))
+		wrapTmplErrMsg(p.handleExpectedEndError(err))
+		wrapTmplErrMsg(p.handleGenericTemplateError(err))
+		wrapTmplErrMsg(fmt.Sprintf("CompileTemplates error: %v", err))
 	}
 
 	if !setting.IsProd {
@@ -128,11 +134,16 @@ func initHTMLRenderer() {
 	}
 }
 
-func wrapFatal(msg string) {
+func wrapTmplErrMsg(msg string) {
 	if msg == "" {
 		return
 	}
-	log.Fatal("Unable to compile templates, %s", msg)
+	if setting.IsProd {
+		// in prod mode, Gitea must have correct templates to run
+		log.Fatal("Gitea can't run with template errors: %s", msg)
+	}
+	// in dev mode, do not need to really exit, because the template errors could be fixed by developer soon and the templates get reloaded
+	log.Error("There are template errors but Gitea continues to run in dev mode: %s", msg)
 }
 
 type templateErrorPrettier struct {
@@ -201,9 +212,8 @@ func (p *templateErrorPrettier) handleTemplateRenderingError(err error) string {
 	} else if execErr, ok := err.(texttemplate.ExecError); ok {
 		layerName := p.assets.GetFileLayerName(execErr.Name + ".tmpl")
 		return fmt.Sprintf("asset from: %s, %s", layerName, err.Error())
-	} else {
-		return err.Error()
 	}
+	return err.Error()
 }
 
 func HandleTemplateRenderingError(err error) string {
@@ -241,7 +251,7 @@ func extractErrorLine(code []byte, lineNum, posNum int, target string) string {
 	b := bufio.NewReader(bytes.NewReader(code))
 	var line []byte
 	var err error
-	for i := 0; i < lineNum; i++ {
+	for i := range lineNum {
 		if line, err = b.ReadBytes('\n'); err != nil {
 			if i == lineNum-1 && errors.Is(err, io.EOF) {
 				err = nil

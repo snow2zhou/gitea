@@ -9,9 +9,9 @@ import (
 	"strings"
 
 	"code.gitea.io/gitea/modules/activitypub"
-	"code.gitea.io/gitea/modules/context"
 	"code.gitea.io/gitea/modules/log"
 	"code.gitea.io/gitea/modules/setting"
+	"code.gitea.io/gitea/services/context"
 
 	ap "github.com/go-ap/activitypub"
 	"github.com/go-ap/jsonld"
@@ -41,18 +41,18 @@ func Person(ctx *context.APIContext) {
 	person.Name = ap.NaturalLanguageValuesNew()
 	err := person.Name.Set("en", ap.Content(ctx.ContextUser.FullName))
 	if err != nil {
-		ctx.ServerError("Set Name", err)
+		ctx.APIErrorInternal(err)
 		return
 	}
 
 	person.PreferredUsername = ap.NaturalLanguageValuesNew()
 	err = person.PreferredUsername.Set("en", ap.Content(ctx.ContextUser.Name))
 	if err != nil {
-		ctx.ServerError("Set PreferredUsername", err)
+		ctx.APIErrorInternal(err)
 		return
 	}
 
-	person.URL = ap.IRI(ctx.ContextUser.HTMLURL())
+	person.URL = ap.IRI(ctx.ContextUser.HTMLURL(ctx))
 
 	person.Icon = ap.Image{
 		Type:      ap.ImageType,
@@ -66,16 +66,16 @@ func Person(ctx *context.APIContext) {
 	person.PublicKey.ID = ap.IRI(link + "#main-key")
 	person.PublicKey.Owner = ap.IRI(link)
 
-	publicKeyPem, err := activitypub.GetPublicKey(ctx.ContextUser)
+	publicKeyPem, err := activitypub.GetPublicKey(ctx, ctx.ContextUser)
 	if err != nil {
-		ctx.ServerError("GetPublicKey", err)
+		ctx.APIErrorInternal(err)
 		return
 	}
 	person.PublicKey.PublicKeyPem = publicKeyPem
 
 	binary, err := jsonld.WithContext(jsonld.IRI(ap.ActivityBaseURI), jsonld.IRI(ap.SecurityContextURI)).Marshal(person)
 	if err != nil {
-		ctx.ServerError("MarshalJSON", err)
+		ctx.APIErrorInternal(err)
 		return
 	}
 	ctx.Resp.Header().Add("Content-Type", activitypub.ActivityStreamsContentType)

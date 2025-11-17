@@ -8,6 +8,8 @@ import (
 	"bytes"
 	"io"
 	"strings"
+
+	"code.gitea.io/gitea/modules/git/gitcmd"
 )
 
 // ObjectType git object type
@@ -31,41 +33,57 @@ func (o ObjectType) Bytes() []byte {
 	return []byte(o)
 }
 
-// HashObject takes a reader and returns SHA1 hash for that reader
-func (repo *Repository) HashObject(reader io.Reader) (SHA1, error) {
-	idStr, err := repo.hashObject(reader)
+type EmptyReader struct{}
+
+func (EmptyReader) Read(p []byte) (int, error) {
+	return 0, io.EOF
+}
+
+func (repo *Repository) GetObjectFormat() (ObjectFormat, error) {
+	if repo != nil && repo.objectFormat != nil {
+		return repo.objectFormat, nil
+	}
+
+	str, err := repo.hashObject(EmptyReader{}, false)
 	if err != nil {
-		return SHA1{}, err
+		return nil, err
+	}
+	hash, err := NewIDFromString(str)
+	if err != nil {
+		return nil, err
+	}
+
+	repo.objectFormat = hash.Type()
+
+	return repo.objectFormat, nil
+}
+
+// HashObject takes a reader and returns hash for that reader
+func (repo *Repository) HashObject(reader io.Reader) (ObjectID, error) {
+	idStr, err := repo.hashObject(reader, true)
+	if err != nil {
+		return nil, err
 	}
 	return NewIDFromString(idStr)
 }
 
-func (repo *Repository) hashObject(reader io.Reader) (string, error) {
-	cmd := NewCommand(repo.Ctx, "hash-object", "-w", "--stdin")
+func (repo *Repository) hashObject(reader io.Reader, save bool) (string, error) {
+	var cmd *gitcmd.Command
+	if save {
+		cmd = gitcmd.NewCommand("hash-object", "-w", "--stdin")
+	} else {
+		cmd = gitcmd.NewCommand("hash-object", "--stdin")
+	}
 	stdout := new(bytes.Buffer)
 	stderr := new(bytes.Buffer)
-	err := cmd.Run(&RunOpts{
-		Dir:    repo.Path,
-		Stdin:  reader,
-		Stdout: stdout,
-		Stderr: stderr,
-	})
+	err := cmd.
+		WithDir(repo.Path).
+		WithStdin(reader).
+		WithStdout(stdout).
+		WithStderr(stderr).
+		Run(repo.Ctx)
 	if err != nil {
 		return "", err
 	}
 	return strings.TrimSpace(stdout.String()), nil
-}
-
-// GetRefType gets the type of the ref based on the string
-func (repo *Repository) GetRefType(ref string) ObjectType {
-	if repo.IsTagExist(ref) {
-		return ObjectTag
-	} else if repo.IsBranchExist(ref) {
-		return ObjectBranch
-	} else if repo.IsCommitExist(ref) {
-		return ObjectCommit
-	} else if _, err := repo.GetBlob(ref); err == nil {
-		return ObjectBlob
-	}
-	return ObjectType("invalid")
 }
