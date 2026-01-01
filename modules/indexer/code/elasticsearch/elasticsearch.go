@@ -4,7 +4,6 @@
 package elasticsearch
 
 import (
-	"bufio"
 	"context"
 	"fmt"
 	"io"
@@ -15,6 +14,7 @@ import (
 	"code.gitea.io/gitea/modules/analyze"
 	"code.gitea.io/gitea/modules/charset"
 	"code.gitea.io/gitea/modules/git"
+	"code.gitea.io/gitea/modules/git/catfile"
 	"code.gitea.io/gitea/modules/git/gitcmd"
 	"code.gitea.io/gitea/modules/gitrepo"
 	"code.gitea.io/gitea/modules/indexer"
@@ -139,7 +139,7 @@ const (
 	}`
 )
 
-func (b *Indexer) addUpdate(ctx context.Context, batchWriter git.WriteCloserError, batchReader *bufio.Reader, sha string, update internal.FileUpdate, repo *repo_model.Repository) ([]elastic.BulkableRequest, error) {
+func (b *Indexer) addUpdate(ctx context.Context, batch catfile.Batch, sha string, update internal.FileUpdate, repo *repo_model.Repository) ([]elastic.BulkableRequest, error) {
 	// Ignore vendored files in code search
 	if setting.Indexer.ExcludeVendored && analyze.IsVendor(update.Filename) {
 		return nil, nil
@@ -162,10 +162,11 @@ func (b *Indexer) addUpdate(ctx context.Context, batchWriter git.WriteCloserErro
 		return []elastic.BulkableRequest{b.addDelete(update.Filename, repo)}, nil
 	}
 
-	if _, err := batchWriter.Write([]byte(update.BlobSha + "\n")); err != nil {
+	if _, err := batch.Writer().Write([]byte(update.BlobSha + "\n")); err != nil {
 		return nil, err
 	}
 
+	batchReader := batch.Reader()
 	_, _, size, err = git.ReadBatchLine(batchReader)
 	if err != nil {
 		return nil, err
@@ -191,7 +192,7 @@ func (b *Indexer) addUpdate(ctx context.Context, batchWriter git.WriteCloserErro
 			Doc(map[string]any{
 				"repo_id":    repo.ID,
 				"filename":   update.Filename,
-				"content":    string(charset.ToUTF8DropErrors(fileContents, charset.ConvertOpts{})),
+				"content":    string(charset.ToUTF8DropErrors(fileContents)),
 				"commit_id":  sha,
 				"language":   analyze.GetCodeLanguage(update.Filename, fileContents),
 				"updated_at": timeutil.TimeStampNow(),
@@ -210,14 +211,14 @@ func (b *Indexer) addDelete(filename string, repo *repo_model.Repository) elasti
 func (b *Indexer) Index(ctx context.Context, repo *repo_model.Repository, sha string, changes *internal.RepoChanges) error {
 	reqs := make([]elastic.BulkableRequest, 0)
 	if len(changes.Updates) > 0 {
-		batch, err := git.NewBatch(ctx, repo.RepoPath())
+		batch, err := gitrepo.NewBatch(ctx, repo)
 		if err != nil {
 			return err
 		}
 		defer batch.Close()
 
 		for _, update := range changes.Updates {
-			updateReqs, err := b.addUpdate(ctx, batch.Writer, batch.Reader, sha, update, repo)
+			updateReqs, err := b.addUpdate(ctx, batch, sha, update, repo)
 			if err != nil {
 				return err
 			}
